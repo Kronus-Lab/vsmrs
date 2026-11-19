@@ -28,18 +28,43 @@ if docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=1 "$BUILDER_IMAGE" tr
     sysctl_flags="--sysctl net.ipv6.conf.all.disable_ipv6=1"
 fi
 
-echo "==> Compiling static $TARGET binary in $BUILDER_IMAGE into $ROOT/dist/vsm"
+# The toolchain, crate registry and target dir are cached either in named
+# volumes (default) or in directories under VSM_CACHE_DIR (for CI).
+if [ -n "${VSM_CACHE_DIR:-}" ]; then
+    mkdir -p "$VSM_CACHE_DIR/rustup" "$VSM_CACHE_DIR/cargo" "$VSM_CACHE_DIR/target"
+    # The rust image keeps its cargo/rustup shims in $CARGO_HOME/bin. A named
+    # volume is seeded from the image by Docker, but an empty bind mount is
+    # not, so seed it once before hiding that path in the builder.
+    if [ ! -x "$VSM_CACHE_DIR/cargo/bin/cargo" ]; then
+        docker run --rm -v "$VSM_CACHE_DIR/cargo:/seed" "$BUILDER_IMAGE" \
+            sh -c 'cp -R /usr/local/cargo/. /seed/'
+    fi
+    rustup_mount="$VSM_CACHE_DIR/rustup:/usr/local/rustup"
+    cargo_mount="$VSM_CACHE_DIR/cargo:/usr/local/cargo"
+    target_mount="$VSM_CACHE_DIR/target:/tmp/target"
+    cache_kind="cache directories under $VSM_CACHE_DIR"
+else
+    rustup_mount="vsm-rustup:/usr/local/rustup"
+    cargo_mount="vsm-cargo:/usr/local/cargo"
+    target_mount="vsm-build-cache:/tmp/target"
+    cache_kind="named Docker volumes"
+fi
+
+echo "==> Compiling static $TARGET binary in $BUILDER_IMAGE into $ROOT/dist/vsm (using $cache_kind)"
 # The repository is mounted read-only so the host tree is never polluted by
-# root-owned build artifacts. The named volume keeps Cargo's target dir cached.
+# root-owned build artifacts. --locked makes an out-of-date Cargo.lock fail
+# instead of silently resolving a different dependency set.
 docker run --rm $sysctl_flags \
     -v "$ROOT:/src:ro" \
-    -v vsm-build-cache:/tmp/target \
+    -v "$rustup_mount" \
+    -v "$cargo_mount" \
+    -v "$target_mount" \
     -v "$ROOT/dist:/out" \
     "$BUILDER_IMAGE" \
     sh -eu -c "
         apk add --no-cache build-base musl-dev
         cd /src
-        CARGO_TARGET_DIR=/tmp/target cargo build --release --target $TARGET
+        CARGO_TARGET_DIR=/tmp/target cargo build --release --locked --target $TARGET
         cp /tmp/target/$TARGET/release/vsm /out/vsm
     "
 

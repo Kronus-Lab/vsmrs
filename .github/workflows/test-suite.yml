@@ -47,9 +47,16 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
+    - name: Cache build toolchain and crates
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/vsm-build
+        key: ${{ runner.os }}-vsm-build-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+        restore-keys: ${{ runner.os }}-vsm-build-
+
     - name: Build
-      run: ./scripts/build-image.sh
-      
+      run: VSM_CACHE_DIR=$HOME/.cache/vsm-build ./scripts/build-image.sh
+
     - name: SBOM
       uses: anchore/sbom-action@v0
       with:

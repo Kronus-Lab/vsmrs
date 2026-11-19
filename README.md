@@ -24,7 +24,11 @@ The application is a single Rust binary built on **tokio** and **axum**.
 `npm run build` (`./scripts/build-image.sh`) compiles it for
 `x86_64-unknown-linux-musl` in a pinned `rust:1-alpine` builder container
 (**statically linked**) into `dist/vsm`; no host musl toolchain is needed. The
-image itself is `FROM scratch` packaging only and contains just `/vsm` plus an
+toolchain, crate registry and target dir are cached in `vsm-rustup`,
+`vsm-cargo` and `vsm-build-cache` (or under `VSM_CACHE_DIR`); Cargo and rustup
+invalidate each layer per dependency or toolchain change, and `--locked` makes
+a stale lockfile fail the build instead of silently re-resolving. The image
+itself is `FROM scratch` packaging only and contains just `/vsm` plus an
 entrypoint:
 
 - `WORKDIR /app`, `EXPOSE 3000`, `ENTRYPOINT ["/vsm"]`
