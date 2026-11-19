@@ -5,6 +5,8 @@
 //! `reqwest` client with redirects disabled and an explicit Rustls root store.
 //! No tokens, JWTs, state, nonces or PKCE verifiers are logged.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, Context, Result};
 use openidconnect::core::{CoreClient, CoreProviderMetadata};
 use openidconnect::{
@@ -13,6 +15,7 @@ use openidconnect::{
     RedirectUrl, TokenResponse as IdTokenResponse,
 };
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
 use crate::session::{new_uuid, PendingLogin, TokenRecord};
@@ -22,6 +25,9 @@ const SCOPES: &str = "openid email profile";
 
 /// Fallback token lifetime when the provider omits `expires_in`.
 const DEFAULT_TOKEN_TTL_SECS: f64 = 3_600.0;
+
+/// How long a failed discovery suppresses further provider round-trips.
+const DISCOVERY_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Client shape produced by `CoreClient::from_provider_metadata`: the
 /// authorization endpoint is set and the token/userinfo endpoints are loosely
@@ -60,75 +66,73 @@ impl UserInfo {
     }
 }
 
-/// A client for the configured OpenID Connect provider.
-pub struct OidcClient {
-    authorize_url: url::Url,
-    client_id: String,
-    redirect_uri: url::Url,
-    http_client: reqwest::Client,
-    // Set by `new`; the test-only `from_parts` client only builds URLs.
+/// State that discovery may replace once the provider becomes reachable.
+///
+/// All of it sits behind one async mutex: the same lock coalesces concurrent
+/// discovery attempts and hands out cloned endpoints/clients without holding a
+/// `std::sync` guard across an await.
+#[derive(Default)]
+struct DiscoveryState {
     client: Option<DiscoveredClient>,
     userinfo_url: Option<url::Url>,
-    // Discovery is attempted at startup, but a failure is retained here so
-    // the server can boot and `GET /auth/login` can answer 502.
-    discovery_error: Option<anyhow::Error>,
+    authorize_url: Option<url::Url>,
+    // No provider error is stored: upstream responses may carry token material.
+    last_failure: Option<Instant>,
+}
+
+impl DiscoveryState {
+    fn is_discovered(&self) -> bool {
+        self.client.is_some()
+    }
+
+    fn is_cached_failure(&self, backoff: Duration) -> bool {
+        self.last_failure
+            .is_some_and(|failed_at| failed_at.elapsed() < backoff)
+    }
+}
+
+/// A client for the configured OpenID Connect provider.
+pub struct OidcClient {
+    // Fallback authorization URL, used before discovery succeeds and by the
+    // test-only `from_parts` client, which never performs discovery.
+    authorize_url: url::Url,
+    client_id: String,
+    client_secret: String,
+    redirect_uri: url::Url,
+    http_client: reqwest::Client,
+    // `None` for URL-only test clients, which need no provider round-trip.
+    issuer: Option<IssuerUrl>,
+    discovery: Mutex<DiscoveryState>,
+    retry_backoff: Duration,
     username_field: String,
     groups_field: String,
 }
 
 impl OidcClient {
-    /// Discovers the provider and prepares the HTTP client used for the code
-    /// exchange and userinfo. A discovery failure is retained in the client and
-    /// reported as `502` by `GET /auth/login`; it does not abort startup.
+    /// Attempts discovery once at startup but never aborts on failure. Any
+    /// later provider use retries with a short negative cache, so a provider
+    /// that was unreachable at boot can recover without a restart.
     pub async fn new(config: &AppConfig) -> Result<Self> {
-        let http_client = build_http_client()?;
-        let issuer = IssuerUrl::from_url(config.auth_issuer.clone());
-        let metadata = match CoreProviderMetadata::discover_async(issuer, &http_client).await {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return Ok(Self {
-                    authorize_url: config.auth_issuer.clone(),
-                    client_id: config.auth_client_id.clone(),
-                    redirect_uri: redirect_uri(config),
-                    http_client,
-                    client: None,
-                    userinfo_url: None,
-                    discovery_error: Some(error.into()),
-                    username_field: config.auth_username_field.clone(),
-                    groups_field: config.auth_groups_field.clone(),
-                });
-            }
-        };
-
-        let authorize_url = metadata.authorization_endpoint().url().to_owned();
-        let userinfo_url = metadata.userinfo_endpoint().map(|url| url.url().to_owned());
-        let client = CoreClient::from_provider_metadata(
-            metadata,
-            ClientId::new(config.auth_client_id.clone()),
-            Some(ClientSecret::new(config.auth_client_secret.clone())),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect_uri(config).to_string())
-                .context("invalid callback redirect URI")?,
-        );
-
-        Ok(Self {
-            authorize_url,
-            client_id: config.auth_client_id.clone(),
-            redirect_uri: redirect_uri(config),
-            http_client,
-            client: Some(client),
-            userinfo_url,
-            discovery_error: None,
-            username_field: config.auth_username_field.clone(),
-            groups_field: config.auth_groups_field.clone(),
-        })
+        Self::new_with_backoff(config, DISCOVERY_RETRY_BACKOFF).await
     }
 
-    /// Whether provider discovery failed; `GET /auth/login` uses this to
-    /// answer `502` instead of starting a login flow.
-    pub fn discovery_failed(&self) -> bool {
-        self.discovery_error.is_some()
+    async fn new_with_backoff(config: &AppConfig, retry_backoff: Duration) -> Result<Self> {
+        let client = Self {
+            authorize_url: config.auth_issuer.clone(),
+            client_id: config.auth_client_id.clone(),
+            client_secret: config.auth_client_secret.clone(),
+            redirect_uri: redirect_uri(config),
+            http_client: build_http_client()?,
+            issuer: Some(IssuerUrl::from_url(config.auth_issuer.clone())),
+            discovery: Mutex::new(DiscoveryState::default()),
+            retry_backoff,
+            username_field: config.auth_username_field.clone(),
+            groups_field: config.auth_groups_field.clone(),
+        };
+        // Ignore the result deliberately: startup stays fast and quiet if the
+        // provider (or its route) is not up yet.
+        let _ = client.discover().await;
+        Ok(client)
     }
 
     /// Builds a URL-only client for unit tests; no discovery or network is
@@ -139,25 +143,99 @@ impl OidcClient {
             authorize_url,
             client_id,
             redirect_uri,
+            client_secret: String::new(),
             http_client: reqwest::Client::new(),
-            client: None,
-            userinfo_url: None,
-            discovery_error: None,
+            issuer: None,
+            discovery: Mutex::new(DiscoveryState::default()),
+            retry_backoff: DISCOVERY_RETRY_BACKOFF,
             username_field: "preferred_username".to_owned(),
             groups_field: "groups".to_owned(),
         }
     }
 
+    /// Test-only control of the negative cache: zero lets recovery tests retry
+    /// immediately instead of sleeping for the production backoff.
+    #[cfg(test)]
+    pub(crate) async fn new_with_retry_backoff_for_tests(
+        config: &AppConfig,
+        backoff: Duration,
+    ) -> Result<Self> {
+        Self::new_with_backoff(config, backoff).await
+    }
+
+    /// Returns a generic error when the provider is still unavailable; no
+    /// provider response detail is ever captured or logged. The async mutex is
+    /// held across the discovery round-trip so concurrent logins cannot
+    /// stampede the provider, then every waiter sees the discovered client.
+    async fn discover(&self) -> Result<()> {
+        let Some(issuer) = self.issuer.clone() else {
+            return Ok(());
+        };
+        {
+            let state = self.discovery.lock().await;
+            if state.is_discovered() {
+                return Ok(());
+            }
+            if state.is_cached_failure(self.retry_backoff) {
+                return Err(anyhow!("OIDC discovery is unavailable"));
+            }
+        }
+
+        let mut state = self.discovery.lock().await;
+        // Another caller may have finished discovery while we waited for the
+        // lock; it may also have failed and started a fresh negative cache.
+        if state.is_discovered() {
+            return Ok(());
+        }
+        if state.is_cached_failure(self.retry_backoff) {
+            return Err(anyhow!("OIDC discovery is unavailable"));
+        }
+
+        let metadata = match CoreProviderMetadata::discover_async(issuer, &self.http_client).await {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                // Record only when the attempt failed; never keep the error.
+                state.last_failure = Some(Instant::now());
+                return Err(anyhow!("OIDC discovery is unavailable"));
+            }
+        };
+        let authorize_url = metadata.authorization_endpoint().url().to_owned();
+        let userinfo_url = metadata.userinfo_endpoint().map(|url| url.url().to_owned());
+        let client = CoreClient::from_provider_metadata(
+            metadata,
+            ClientId::new(self.client_id.clone()),
+            Some(ClientSecret::new(self.client_secret.clone())),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(self.redirect_uri.to_string())
+                .context("invalid callback redirect URI")?,
+        );
+
+        state.authorize_url = Some(authorize_url);
+        state.userinfo_url = userinfo_url;
+        state.client = Some(client);
+        state.last_failure = None;
+        Ok(())
+    }
+
     /// Returns the authorization URL and the one-time login state the caller
-    /// must store before redirecting the browser.
-    pub fn authorization_request(&self) -> Result<(url::Url, PendingLogin)> {
+    /// must store before redirecting the browser. Discovery is retried here so
+    /// a provider that recovers after a failed startup serves logins again.
+    pub async fn authorization_request(&self) -> Result<(url::Url, PendingLogin)> {
+        self.discover().await?;
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         // The state doubles as the Redis key id so the callback can find the
         // pending record from the query parameter alone; it is single-use.
         let state = CsrfToken::new(new_uuid());
         let nonce = Nonce::new_random();
 
-        let mut url = self.authorize_url.clone();
+        let mut url = self
+            .discovery
+            .lock()
+            .await
+            .authorize_url
+            .clone()
+            .unwrap_or_else(|| self.authorize_url.clone());
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &self.client_id)
@@ -181,14 +259,19 @@ impl OidcClient {
     /// Exchanges the code, requires and validates the ID token signature and
     /// nonce, and reads the configured userinfo fields.
     pub async fn complete(&self, code: &str, nonce: &str, verifier: &str) -> Result<UserInfo> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow!("OIDC client is not configured"))?;
-        let userinfo_url = self
-            .userinfo_url
-            .as_ref()
-            .ok_or_else(|| anyhow!("OIDC userinfo endpoint was not discovered"))?;
+        self.discover().await?;
+        let (client, userinfo_url) = {
+            let state = self.discovery.lock().await;
+            let client = state
+                .client
+                .clone()
+                .ok_or_else(|| anyhow!("OIDC client is not configured"))?;
+            let userinfo_url = state
+                .userinfo_url
+                .clone()
+                .ok_or_else(|| anyhow!("OIDC userinfo endpoint was not discovered"))?;
+            (client, userinfo_url)
+        };
 
         let token_response = client
             .exchange_code(AuthorizationCode::new(code.to_owned()))
@@ -401,11 +484,14 @@ pub(crate) mod test_support {
     }
 
     /// Mounts a discovery endpoint that fails, with no other provider stubs.
+    /// Its low priority lets a healthy discovery stub mounted later in a
+    /// recovery test take precedence.
     pub(crate) async fn mount_failing_discovery(server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
             .expect(1)
+            .with_priority(9)
             .mount(server)
             .await;
     }
@@ -414,6 +500,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use serde_json::json;
     use url::Url;
@@ -424,8 +512,8 @@ mod tests {
     use crate::config::AppConfig;
     use crate::session::{MemoryStore, PendingLogin, SessionStore};
 
-    #[test]
-    fn authorize_url_uses_contract_parameters() {
+    #[tokio::test]
+    async fn authorize_url_uses_contract_parameters() {
         let client = OidcClient::from_parts(
             Url::parse("http://kc.local.kronus.network/realms/devel/protocol/openid-connect/auth")
                 .expect("valid authorize URL"),
@@ -435,6 +523,7 @@ mod tests {
 
         let (url, pending) = client
             .authorization_request()
+            .await
             .expect("authorization request builds");
 
         let params: HashMap<String, String> = url
@@ -525,6 +614,7 @@ mod tests {
         let client = OidcClient::new(&config).await.expect("discovery succeeds");
         let (url, _) = client
             .authorization_request()
+            .await
             .expect("authorization request builds");
         let redirect_uri = url
             .query_pairs()
@@ -598,15 +688,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_retains_discovery_failure_without_aborting() {
+    async fn new_survives_failed_discovery_and_retries_when_provider_recovers() {
         let server = MockServer::start().await;
         test_support::mount_failing_discovery(&server).await;
         let config = test_support::config(&server.uri());
 
+        let client = OidcClient::new_with_retry_backoff_for_tests(&config, Duration::ZERO)
+            .await
+            .expect("discovery failure must not abort startup");
+        server.verify().await;
+
+        // Same server, now reachable: the healthy higher-priority stub wins.
+        test_support::mount_provider(&server, json!({}), 0).await;
+        let (url, _) = client
+            .authorization_request()
+            .await
+            .expect("a successful retry makes the instance functional");
+        let base = server.uri();
         assert!(
-            OidcClient::new(&config).await.is_ok(),
-            "discovery failure must not abort startup"
+            url.as_str().starts_with(&format!("{base}/auth?")),
+            "unexpected authorization URL: {url}"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_is_negatively_cached() {
+        let server = MockServer::start().await;
+        test_support::mount_failing_discovery(&server).await;
+        let config = test_support::config(&server.uri());
+
+        let client = OidcClient::new(&config)
+            .await
+            .expect("discovery failure must not abort startup");
+        assert!(client.authorization_request().await.is_err());
+        assert!(client.authorization_request().await.is_err());
+        // The startup attempt is the only provider round-trip.
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_logins_coalesce_discovery_retry() {
+        let server = MockServer::start().await;
+        test_support::mount_failing_discovery(&server).await;
+        let config = test_support::config(&server.uri());
+        let client = Arc::new(
+            OidcClient::new_with_retry_backoff_for_tests(&config, Duration::ZERO)
+                .await
+                .expect("discovery failure must not abort startup"),
+        );
+        server.verify().await;
+
+        // Delay the healthy response so all concurrent callers overlap.
+        let base = server.uri();
+        let issuer = Url::parse(&base).expect("valid issuer").to_string();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({
+                        "issuer": issuer,
+                        "authorization_endpoint": format!("{base}/auth"),
+                        "token_endpoint": format!("{base}/token"),
+                        "userinfo_endpoint": format!("{base}/userinfo"),
+                        "jwks_uri": format!("{base}/jwks"),
+                        "response_types_supported": ["code"],
+                        "subject_types_supported": ["public"],
+                        "id_token_signing_alg_values_supported": ["HS256"],
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "keys": [] })))
+            .mount(&server)
+            .await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let client = Arc::clone(&client);
+            tasks.push(tokio::spawn(
+                async move { client.authorization_request().await },
+            ));
+        }
+        for task in tasks {
+            task.await
+                .expect("task joins")
+                .expect("authorization request builds");
+        }
+        // Exactly one retry, despite eight concurrent logins.
         server.verify().await;
     }
 }
