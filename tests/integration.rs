@@ -98,3 +98,79 @@ async fn whoami_expired_is_unauthorized() {
     );
     support::logout(&mut s).await;
 }
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn download_returns_ovpn() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    let token = s.csrf_token.clone().unwrap();
+    let r = s
+        .post_form("/api/servers/myserver", &[("csrf_token", &token)])
+        .await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let disposition = r.headers()[reqwest::header::CONTENT_DISPOSITION].clone();
+    assert!(r.text().await.unwrap().contains("dev tun"));
+    assert_eq!(disposition, "attachment; filename=\"myserver.ovpn\"");
+    support::logout(&mut s).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn download_expired_is_unauthorized() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    support::expire_session(&mut s).await;
+    let token = s.csrf_token.clone().unwrap();
+    let r = s
+        .post_form("/api/servers/myserver", &[("csrf_token", &token)])
+        .await;
+    assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED);
+    support::logout(&mut s).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn download_anonymous_is_unauthorized() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let r = s
+        .post_form("/api/servers/myserver", &[("csrf_token", "")])
+        .await;
+    assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn download_unknown_server_is_forbidden() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    let token = s.csrf_token.clone().unwrap();
+    let r = s
+        .post_form("/api/servers/mybadserver", &[("csrf_token", &token)])
+        .await;
+    assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN);
+    let content_type = r.headers()[reqwest::header::CONTENT_TYPE].clone();
+    assert!(content_type.to_str().unwrap().starts_with("text/html"));
+    assert!(r.text().await.unwrap().contains("Forbidden"));
+    support::logout(&mut s).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn download_denied_server_is_forbidden() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    let token = s.csrf_token.clone().unwrap();
+    let r = s
+        .post_form("/api/servers/myserver4", &[("csrf_token", &token)])
+        .await;
+    assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN);
+    let content_type = r.headers()[reqwest::header::CONTENT_TYPE].clone();
+    assert!(content_type.to_str().unwrap().starts_with("text/html"));
+    assert!(r.text().await.unwrap().contains("Forbidden"));
+    support::logout(&mut s).await;
+}
