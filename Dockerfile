@@ -1,11 +1,8 @@
-FROM rust:1-alpine AS builder
-RUN apk add --no-cache build-base musl-dev
-WORKDIR /src
-COPY . .
-RUN cargo build --release --target x86_64-unknown-linux-musl
-
+# Packaging only: the binary is produced by scripts/build-image.sh, which
+# compiles the static musl binary in a pinned builder container. The build
+# context contains only dist/vsm (see .dockerignore).
 FROM scratch
-COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/vsm /vsm
+COPY dist/vsm /vsm
 WORKDIR /app
 USER 65532:65532
 EXPOSE 3000

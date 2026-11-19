@@ -48,12 +48,7 @@ jobs:
       uses: docker/setup-buildx-action@v3
 
     - name: Build
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ./Dockerfile
-        load: true
-        tags: kr0nus/vsm:devel
+      run: ./scripts/build-image.sh
       
     - name: SBOM
       uses: anchore/sbom-action@v0

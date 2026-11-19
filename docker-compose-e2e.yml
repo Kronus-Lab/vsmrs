@@ -1,8 +1,5 @@
 services:
   vsm:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: kr0nus/vsm:devel
     restart: always
     expose:

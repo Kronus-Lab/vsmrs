@@ -1,6 +1,9 @@
 # Rust build artifacts
 target/
 
+# Prebuilt binary used to build the container image
+dist/
+
 # Local log file
 vsm.log
 

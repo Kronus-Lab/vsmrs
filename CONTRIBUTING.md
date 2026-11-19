@@ -18,6 +18,10 @@ Pull requests are the best way to propose changes to the codebase (we use [Githu
    `cargo clippy --all-targets -- -D warnings` (or `npm run lint`, which runs
    both). CI enforces these; fix warnings instead of suppressing them.
 3. Run the unit tests: `cargo test` (also `npm run test:unit`).
+   To build the container image, run `npm run build` (or
+   `./scripts/build-image.sh`): it compiles the static musl binary in a pinned
+   `rust:1-alpine` builder container into `dist/vsm`, then packages it into a
+   `FROM scratch` image. No host musl toolchain is required.
 4. If your change affects the running service, run the black-box HTTP
    integration suite against the stack. `npm test` runs
    `cargo test --test integration -- --ignored` with its `pretest`/`posttest`

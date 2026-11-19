@@ -205,7 +205,7 @@ remote-cert-tls server
 
 ### FR-12 — Deployment and environment behavior
 
-- Container: multi-stage build, `rust:1-alpine` builder producing a static musl binary, then `FROM scratch` with the binary only, numeric user `65532:65532`, `WORKDIR /app`, `EXPOSE 3000`, `ENTRYPOINT ["/vsm"]`, listening on `0.0.0.0:3000`. No shell, CA bundle, or `/etc/passwd` in the runtime image.
+- Container: `npm run build` (`scripts/build-image.sh`) compiles a static musl binary in a pinned `rust:1-alpine` builder container into `dist/vsm`; the image is `FROM scratch` packaging only (context: just `dist/vsm`), numeric user `65532:65532`, `WORKDIR /app`, `EXPOSE 3000`, `ENTRYPOINT ["/vsm"]`, listening on `0.0.0.0:3000`. No shell, CA bundle, or `/etc/passwd` in the runtime image.
 - Compose layers: `docker-compose-common.yml` (Vault dev mode with root token `admin`, Keycloak `start-dev` admin/admin, Redis published on 6379) plus either `docker-compose-e2e.yml` (VSM + HAProxy with port 80 published) or `docker-compose-integration.yml` (HAProxy only; the release binary runs on the host).
 - HAProxy routes by `Host` header; development aliases are the three `*.local.kronus.network` names. Only the e2e config includes a `vsm` backend.
 - `ENV == "development"` enables debug tracing, HTTP redirect URIs, and disabled Vault TLS verification, and omits cookie `Secure`/`Domain`; never use it in production.

@@ -20,9 +20,12 @@ OpenVPN profile whose certificate is issued on demand by HashiCorp Vault.
 
 ## Implementation
 
-The application is a single Rust binary built on **tokio** and **axum**. It is
-compiled for `x86_64-unknown-linux-musl` on Alpine and is **statically linked**;
-the runtime image is `FROM scratch` and contains only `/vsm` plus an entrypoint:
+The application is a single Rust binary built on **tokio** and **axum**.
+`npm run build` (`./scripts/build-image.sh`) compiles it for
+`x86_64-unknown-linux-musl` in a pinned `rust:1-alpine` builder container
+(**statically linked**) into `dist/vsm`; no host musl toolchain is needed. The
+image itself is `FROM scratch` packaging only and contains just `/vsm` plus an
+entrypoint:
 
 - `WORKDIR /app`, `EXPOSE 3000`, `ENTRYPOINT ["/vsm"]`
 - numeric user `65532:65532` (no shell, no `/etc/passwd`, no CA bundle)
@@ -121,13 +124,12 @@ npm run audit              # cargo audit
 `cargo audit` uses `.cargo/audit.toml` to ignore only `RUSTSEC-2023-0071`
 (unreachable RSA private-key path; see the comment in that file). All other
 advisories are enforced. To build the statically linked binary and the scratch
-image:
+image (the binary is compiled in a pinned builder container into `dist/vsm`,
+then packaged into a `FROM scratch` image):
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-file target/x86_64-unknown-linux-musl/release/vsm   # statically linked
-docker build -t kr0nus/vsm:devel .
+npm run build                 # or: ./scripts/build-image.sh
+file dist/vsm                 # statically linked
 ```
 
 Integration tests are black-box HTTP tests against the real stack. Bootstrap

@@ -3,7 +3,7 @@
     "cypress": "^15.3.0"
   },
   "scripts": {
-    "build": "docker buildx build -t kr0nus/vsm:devel .",
+    "build": "./scripts/build-image.sh",
     "lint": "cargo fmt --check && cargo clippy --all-targets -- -D warnings",
     "license": "cargo deny check licenses",
     "audit": "cargo audit",
