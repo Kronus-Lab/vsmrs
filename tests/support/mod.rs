@@ -1,8 +1,9 @@
 //! Black-box HTTP helpers used by the integration tests.
 //!
-//! These mirror the Python `test/fixtures` clients: no redirects are followed
-//! automatically, cookies are kept in a small manual jar, and the authentication
-//! flow is driven through the same three hops as the historical pytest suite.
+//! These mirror the black-box HTTP harness of the historical integration
+//! fixtures: no redirects are followed automatically, cookies are kept in a
+//! small manual jar, and the authentication flow is driven through the same
+//! three hops.
 
 use std::collections::BTreeMap;
 
@@ -54,6 +55,10 @@ impl TestSession {
         url.to_string()
     }
 
+    /// Resolve a path against the configured base URL.
+    ///
+    /// `VSM_BASE_URL` must be origin-only (scheme, host and port, no path
+    /// prefix): relative paths are joined, not concatenated, onto the base.
     fn resolve(&self, path_or_url: &str) -> url::Url {
         if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
             url::Url::parse(path_or_url).expect("invalid absolute URL")
@@ -204,7 +209,10 @@ pub async fn logout(session: &mut TestSession) {
             session.csrf_token = Some(token.clone());
             token
         } else {
-            session.csrf_token.clone().unwrap_or_default()
+            session
+                .csrf_token
+                .clone()
+                .expect("logout requires a captured CSRF token")
         }
     };
 
