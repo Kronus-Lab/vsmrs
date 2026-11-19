@@ -44,11 +44,12 @@ impl TestSession {
     /// binary listens on `localhost`, so only scheme and authority are swapped.
     pub fn rewrite_base(&self, absolute: &str) -> String {
         let mut url = url::Url::parse(absolute).expect("callback URL must be absolute");
-        url.set_scheme(self.base.scheme())
+        let base = self.base_url();
+        url.set_scheme(base.scheme())
             .expect("cannot change callback scheme");
-        url.set_host(self.base.host_str())
+        url.set_host(base.host_str())
             .expect("cannot change callback host");
-        url.set_port(self.base.port())
+        url.set_port(base.port())
             .expect("cannot change callback port");
         url.to_string()
     }
