@@ -23,7 +23,7 @@ jobs:
       run: cargo fmt --check
 
     - name: Clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
 
     - name: Unit tests
       run: cargo test
@@ -177,22 +177,7 @@ jobs:
         cat vsm.log
         exit 1
 
-    - name: Install python version
-      uses: gabrielfalcao/pyenv-action@v17
-      with:
-        default: 3.12
-        command: pip install -U pip  # upgrade pip after installing python
-
-    - name: Install dependencies
-      run: |
-        pip install -r requirements.txt -r requirements-dev.txt
-
-    - name: Execute tests with code coverage
-      uses: pavelzw/pytest-action@v2
-      with:
-        verbose: true
-        emoji: true
-        job-summary: true
-        custom-arguments: "-q"
-        click-to-expand: true
-        report-title: "Integration Tests Report"
+    - name: Run Rust integration tests
+      env:
+        VSM_BASE_URL: http://localhost:3000
+      run: cargo test --test integration -- --ignored
