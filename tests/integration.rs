@@ -57,3 +57,44 @@ async fn logout_when_anonymous_is_idempotent() {
     assert_eq!(r.status(), reqwest::StatusCode::FOUND);
     assert_eq!(r.headers()[reqwest::header::LOCATION], "/");
 }
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn whoami_requires_login() {
+    let mut s = TestSession::new(Some(&base_url()));
+    assert_eq!(
+        s.get("/api/whoami").await.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn whoami_returns_user_and_servers() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    let response = s.get("/api/whoami").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("testuser"));
+    for server in ["myserver", "myserver2", "myserver3"] {
+        assert!(body.contains(server), "missing {server}");
+    }
+    assert!(!body.contains("myserver4"));
+    support::logout(&mut s).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn whoami_expired_is_unauthorized() {
+    let mut s = TestSession::new(Some(&base_url()));
+    let mut idp = TestSession::new(None);
+    support::login(&mut s, &mut idp).await;
+    support::expire_session(&mut s).await;
+    assert_eq!(
+        s.get("/api/whoami").await.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    support::logout(&mut s).await;
+}
