@@ -66,6 +66,8 @@ percent-encoding = "2"
 Run: `cargo check --all-targets`
 Expected: builds (network may be needed to fetch the new crates).
 
+If `cargo deny` is installed, run `cargo deny check licenses`. If it flags `MPL-2.0` from `scraper`'s `cssparser`/`selectors`, add `MPL-2.0` to the allow list in `deny.toml`.
+
 - [ ] **Step 2: Write `tests/support/mod.rs`**
 
 Implement `TestSession` with `reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())`. Resolve a request target as follows: if it starts with `http://` or `https://`, parse it as-is; otherwise `base.join(path)`. Before each request add a `COOKIE` header built from `name=value` pairs; after each response iterate `get_all(SET_COOKIE)`, take the text before the first `;`, split at the first `=`, and either insert the value or delete the entry when the value is empty or a `Max-Age=0` attribute is present.
@@ -276,11 +278,9 @@ async fn download_returns_ovpn() {
     let token = s.csrf_token.clone().unwrap();
     let r = s.post_form("/api/servers/myserver", &[("csrf_token", &token)]).await;
     assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let disposition = r.headers()[reqwest::header::CONTENT_DISPOSITION].clone();
     assert!(r.text().await.unwrap().contains("dev tun"));
-    assert_eq!(
-        r.headers()[reqwest::header::CONTENT_DISPOSITION],
-        "attachment; filename=\"myserver.ovpn\""
-    );
+    assert_eq!(disposition, "attachment; filename=\"myserver.ovpn\"");
     support::logout(&mut s).await;
 }
 ```
@@ -366,8 +366,7 @@ Use exactly the table in the spec §7.1: `build`, `lint` (`cargo fmt --check && 
 git rm test/conftest.py test/test_index.py test/test_server.py test/test_whoami.py \
   test/fixtures/__init__.py test/fixtures/client.py test/fixtures/expire_session.py \
   test/fixtures/login.py test/fixtures/logout.py \
-  coverage-badge.svg tests-badge.svg
-rm -f requirements.txt requirements-dev.txt pyproject.toml all.lst
+  requirements.txt requirements-dev.txt pyproject.toml all.lst
 rm -rf test/__pycache__ test/fixtures/__pycache__
 ```
 
@@ -395,7 +394,7 @@ Expected: no output.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -A package.json .vscode .gitignore test
+git add -A
 git commit -m "chore: replace Python tooling with Rust equivalents and remove Python files"
 ```
 
