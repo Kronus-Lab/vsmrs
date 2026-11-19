@@ -1,0 +1,5 @@
+# Reporting plugins required by pavelzw/pytest-action@v2 in CI
+# (the action appends --md and --emoji to the pytest command).
+defusedxml==0.7.1
+pytest-md==0.2.0
+pytest-emoji==0.2.0

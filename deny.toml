@@ -1,0 +1,25 @@
+# License policy for the Rust dependency tree.
+# The allowlist below is derived from the SPDX identifiers declared by the
+# crates in Cargo.lock; anything else is denied by default.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+exceptions = [
+    # These WASI support crates are Apache-2.0 with the LLVM exception.
+    { name = "wasi", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    { name = "wasip2", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    { name = "wit-bindgen", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
