@@ -54,16 +54,21 @@ cargo build --release
 ./target/release/vsm
 ```
 
-`FLASK_SECRET`, `ENV`, `HOSTNAME`, `REDIS_HOST`, `REDIS_PORT`, `VAULT_URL`,
+`SESSION_SECRET`, `ENV`, `HOSTNAME`, `REDIS_HOST`, `REDIS_PORT`, `VAULT_URL`,
 `CUSTOM_VAULT_CA` (optional), `AUTH_ISSUER`, `AUTH_CLIENT_ID`,
 `AUTH_CLIENT_SECRET`, `AUTH_USERNAME_FIELD`, and `AUTH_GROUPS_FIELD` are loaded
 from `app.json`; each mapping in `vpn_group_mapping.json` supplies
 `vpn_server`, `idp_group`, `vault_metadata_mountpoint`, `vault_metadata_path`,
 `vault_pki_mountpoint`, `vault_jwt_role`, and `vault_jwt_path`. Duplicate
-`vpn_server` values or missing/invalid keys abort startup. `ENV=development`
-changes tracing, the callback scheme, Vault TLS verification, and cookie
-`Secure`/`Domain` behavior; never use it in production. The `FLASK_APP` key in
-the JSON is retained only as upstream compatibility data and is informational.
+`vpn_server` values or missing/invalid keys abort startup. `SESSION_SECRET`
+must be at least 32 bytes unless `ENV=development`; `ENV=development` changes
+tracing, the callback scheme, Vault TLS verification, and cookie
+`Secure`/`Domain` behavior — never use it in production.
+
+**Breaking configuration change:** `FLASK_SECRET` was renamed to
+`SESSION_SECRET`. Update deployed `app.json` files before upgrading: startup
+now fails when `SESSION_SECRET` is absent (or too short outside development).
+The former application-entrypoint key is no longer read.
 
 ### Vault CA trust
 
@@ -82,7 +87,7 @@ status line, not the CA value.
 |---|---|---|
 | `GET` | `/` | `200` portal with one CSRF-protected POST form per authorized server, or `302 /auth/login` without a session |
 | `GET` | `/auth/login` | `302` to the OIDC provider; `502` on discovery failure |
-| `GET` | `/auth/callback` | validates `state`, ID-token `nonce`, exchange, and userinfo; `401` on failure, `302 /` when the provider returns no token |
+| `GET` | `/auth/callback` | validates pending state, ID-token `nonce`, exchange, and userinfo; `401` on failure, `302 /` when the provider returns no token |
 | `GET` | `/auth/logout` | `405` with `Allow: POST` |
 | `POST` | `/auth/logout` | form-encoded `csrf_token`; deletes the Redis token, clears the cookie, `302 /`; no session is also `302 /` (idempotent) |
 | `GET` | `/api/whoami` | `200` JSON identity/server list, or `401 {"error-message":"Not Authenticated"}` |
@@ -101,14 +106,16 @@ field; browser-route errors are small HTML pages. A missing groups claim is a
 
 ## Build and verification
 
-Static checks (from the repository root):
+Only Cypress is installed from npm; all application checks are Cargo or shell
+commands. From the repository root:
 
 ```sh
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-cargo audit
-cargo deny check licenses
+npm install                # installs the Cypress devDependency
+npm run lint               # cargo fmt --check && cargo clippy --all-targets -- -D warnings
+npm run test:unit          # cargo test
+npm run coverage           # cargo llvm-cov --html
+npm run license            # cargo deny check licenses
+npm run audit              # cargo audit
 ```
 
 `cargo audit` uses `.cargo/audit.toml` to ignore only `RUSTSEC-2023-0071`
@@ -124,19 +131,27 @@ docker build -t kr0nus/vsm:devel .
 ```
 
 Integration tests are black-box HTTP tests against the real stack. Bootstrap
-order is Redis → Keycloak → Vault → Terraform → VSM → tests. For local runs,
-bring up the common compose file plus the integration overlay, apply the
-Terraform fixtures, start the release binary **from the repository root** (the
-config paths are relative), then run pytest:
+order is Redis → Keycloak → Vault → Terraform → VSM → tests. `npm test` runs
+`cargo test --test integration -- --ignored`; its `pretest`/`posttest` hooks
+bring the compose stack and Terraform fixtures up and down
+(`./test/presetup/setup.sh integration` and `./test/presetup/cleanup.sh`). The
+tests expect a **running VSM** reachable at `VSM_BASE_URL` (default
+`http://localhost:3000`) — they never start the binary themselves. For a local
+run with the binary already started from the repository root:
 
 ```sh
-PATH="/tmp/opencode/bin:$PATH"   # only if terraform is not already on PATH
+VSM_BASE_URL=http://localhost:3000 npm test
+```
+
+Or drive each step explicitly:
+
+```sh
 docker compose -f docker-compose-common.yml -f docker-compose-integration.yml up -d
 ./test/presetup/wait.sh
 (cd test/presetup && terraform init --upgrade && terraform apply --auto-approve)
 cargo build --release
 ./target/release/vsm &
-pytest -q
+VSM_BASE_URL=http://localhost:3000 cargo test --test integration -- --ignored
 ```
 
 End-to-end tests use the e2e overlay (which supplies the VSM backend and
@@ -153,9 +168,3 @@ rm -rf cypress/screenshots cypress/downloads
 
 CI runs the Rust checks, the integration suite, and both Cypress browser jobs
 on every pull request.
-
-## Legacy notes
-
-The former Python/Flask application runtime has been removed. The Python files
-that remain belong to the black-box test suite only (see `requirements.txt`);
-they are not part of the deployed application.

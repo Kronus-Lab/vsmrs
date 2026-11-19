@@ -36,7 +36,7 @@ Loaded once at process start from a path relative to the working directory (`/ap
 
 | Key | Type | Meaning |
 |---|---|---|
-| `FLASK_SECRET` | string | Cookie-signing secret; stable across replicas. >= 32 bytes outside development. |
+| `SESSION_SECRET` | string | Cookie-signing secret; stable across replicas. >= 32 bytes outside development. |
 | `ENV` | `"development"` or other | Selects debug logging, HTTP redirect URI, Vault TLS verification, cookie `Secure`/`Domain`. Never use `development` in production. |
 | `HOSTNAME` | string | Public hostname; used as cookie `Domain` outside development. |
 | `REDIS_HOST`, `REDIS_PORT` | string, string/int | Redis endpoint, DB 0 hard-coded. |
@@ -46,7 +46,6 @@ Loaded once at process start from a path relative to the working directory (`/ap
 | `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET` | string | Confidential OIDC client credentials. |
 | `AUTH_USERNAME_FIELD` | string | Userinfo claim used as display name and certificate CN. |
 | `AUTH_GROUPS_FIELD` | string | Userinfo claim holding the groups list. |
-| `FLASK_APP` | string | Informational only. |
 
 ### 2.2 `config/vsm/vpn_group_mapping.json`
 
@@ -67,7 +66,7 @@ List of objects; each field is required.
 - every required key present and non-empty; `REDIS_PORT` parses as a port; `AUTH_ISSUER` is an absolute URL;
 - every mapping has all seven fields;
 - **no two mappings share a `vpn_server`** — startup aborts on a duplicate;
-- `FLASK_SECRET` non-empty; >= 32 bytes outside development;
+- `SESSION_SECRET` non-empty; >= 32 bytes outside development;
 - every loaded mapping is logged (without secrets).
 
 Adding a VPN server requires one mapping plus matching Vault metadata/PKI; no code change.
@@ -132,7 +131,7 @@ Invalid metadata is rejected before rendering. The multi-line exemption applies 
 
 ## 4. Session and state contract
 
-- **Cookie:** name `session`; signed with HMAC-SHA256 keyed by `FLASK_SECRET`; contains only a 32-char lowercase hex UUID. Attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` outside development, `Domain=HOSTNAME` outside development. No token material in the browser.
+- **Cookie:** name `session`; signed with HMAC-SHA256 keyed by a key derived from `SESSION_SECRET` (HKDF-SHA256); contains only a 32-char lowercase hex UUID. Attributes: `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` outside development, `Domain=HOSTNAME` outside development. No token material in the browser.
 - **Token record:** Redis key `<uuid>` → JSON with `access_token`, `expires_at`, `userinfo`, `csrf_token`. No long-lived token in the cookie.
 - **Expiry:** a session is valid only if the cookie has a UUID, Redis holds the key, and `expires_at > now` (strict). The record is stored with `EX = expires_at - now` and also checked at read time; expired keys are deleted on read. No sliding renewal and no refresh-token use.
 - **Pending login:** Redis key `oidc:<random>` with a 10-minute TTL; one-time use; removed on callback. The random id is carried in a short-lived signed cookie.
@@ -225,8 +224,8 @@ remote-cert-tls server
 
 ## 11. Verification contract
 
-1. **Static:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo audit`, `cargo deny check licenses`.
-2. **Integration:** pytest suite (kept as black-box HTTP tests, updated for §12) against the real stack; asserts portal, `whoami`, valid download, `401` on expiry/no session, `403` for denied/unknown servers, `302` on unauthenticated `/`.
+1. **Static:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo audit`, `cargo deny check licenses`.
+2. **Integration:** the Rust integration suite in `tests/integration.rs` with helpers in `tests/support/mod.rs` — the historical black-box HTTP scenarios, updated for §12 and run with `cargo test --test integration -- --ignored` against the real stack; asserts portal, `whoami`, valid download, `401` on expiry/no session, `403` for denied/unknown servers, `302` on unauthenticated `/`.
 3. **E2E:** Cypress `cypress/e2e/vsm.cy.js` in Chrome and Firefox; updated to submit portal forms with CSRF and assert the `403` page; delete screenshots/downloads between runs.
 4. **Image:** confirm `FROM scratch`, no shell, no dynamic linking, no CA bundle, and config not baked in.
 
@@ -234,7 +233,7 @@ remote-cert-tls server
 
 | # | Area | As-built Python app | Rust contract | Why | Test impact |
 |---|---|---|---|---|---|
-| 1 | Download method | `GET /api/servers/{s}` link | `POST` form + CSRF token | CSRF protection | Update Cypress and pytest |
+| 1 | Download method | `GET /api/servers/{s}` link | `POST` form + CSRF token | CSRF protection | Update Cypress and the Rust integration suite |
 | 2 | Logout method | `GET /auth/logout` | `POST` + CSRF; `GET` → `405` | CSRF protection | Update all logout helpers |
 | 3 | Logout when anonymous | unhandled error | idempotent `302 /` | Defect fix | New test |
 | 4 | Denied/unknown server | `302 /` | `403` error page | Correct semantics | Update status assertions |
@@ -261,6 +260,6 @@ remote-cert-tls server
 - `502` for Vault and IdP discovery failures; `401` for all callback verification failures; "no token" keeps `302 /`.
 - `CUSTOM_VAULT_CA` keeps the upstream inline-PEM form; a value that is not PEM is treated as a path to a mounted PEM file. If the issuer also needs custom trust, add a separate key.
 - Debug logs include only non-secret metadata fields (`hostname`, `port`, `protocol`, `cipher`, `digest`, `server_dn`); CA blobs, `server_tls_key`, issued keys, and tokens are never logged.
-- Keep pytest/Cypress as black-box suites rather than porting them to Rust.
+- Keep the black-box HTTP scenarios and Cypress as the verification suites; the HTTP scenarios are now implemented as the Rust integration suite in `tests/integration.rs`.
 
 **Deferred, not in scope:** PGP/S-MIME profile encryption (#3), event windows (#53), mapping restructure for performance (#2), release-tag builds (#6), dependency CVE backlog (#61–65), rate limiting, download auditing, and profile encryption beyond TLS.
