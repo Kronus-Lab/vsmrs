@@ -316,7 +316,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn config(base: &str) -> AppConfig {
         AppConfig {
-            flask_secret: "itsasecret".to_owned(),
+            session_secret: "itsasecret".to_owned(),
             env: "development".to_owned(),
             hostname: "localhost".to_owned(),
             redis_host: "localhost".to_owned(),
@@ -508,7 +508,7 @@ mod tests {
             .await;
 
         let config = AppConfig {
-            flask_secret: "itsasecret".to_owned(),
+            session_secret: "itsasecret".to_owned(),
             env: "development".to_owned(),
             hostname: "localhost".to_owned(),
             redis_host: "localhost".to_owned(),

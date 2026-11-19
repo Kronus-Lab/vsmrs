@@ -11,13 +11,13 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use url::Url;
 
-/// Minimum `FLASK_SECRET` length outside development, in bytes.
+/// Minimum `SESSION_SECRET` length outside development, in bytes.
 const MIN_PRODUCTION_SECRET_BYTES: usize = 32;
 
 /// Settings read from `config/vsm/app.json`.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub flask_secret: String,
+    pub session_secret: String,
     pub env: String,
     pub hostname: String,
     pub redis_host: String,
@@ -96,16 +96,16 @@ fn parse_app_config(raw: &Map<String, Value>) -> Result<AppConfig> {
     let env = required_string(raw, "ENV")?;
     let is_development = env == "development";
 
-    let flask_secret = required_string(raw, "FLASK_SECRET")?;
-    if flask_secret.len() < MIN_PRODUCTION_SECRET_BYTES {
+    let session_secret = required_string(raw, "SESSION_SECRET")?;
+    if session_secret.len() < MIN_PRODUCTION_SECRET_BYTES {
         if is_development {
             tracing::warn!(
-                "FLASK_SECRET is shorter than {MIN_PRODUCTION_SECRET_BYTES} bytes; \
+                "SESSION_SECRET is shorter than {MIN_PRODUCTION_SECRET_BYTES} bytes; \
                  this is only acceptable in development"
             );
         } else {
             bail!(
-                "FLASK_SECRET must be at least {MIN_PRODUCTION_SECRET_BYTES} bytes \
+                "SESSION_SECRET must be at least {MIN_PRODUCTION_SECRET_BYTES} bytes \
                  when ENV is not development"
             );
         }
@@ -117,7 +117,7 @@ fn parse_app_config(raw: &Map<String, Value>) -> Result<AppConfig> {
         .with_context(|| format!("REDIS_PORT `{redis_port_text}` is not a valid port"))?;
 
     Ok(AppConfig {
-        flask_secret,
+        session_secret,
         env,
         hostname: required_string(raw, "HOSTNAME")?,
         redis_host: required_string(raw, "REDIS_HOST")?,
@@ -205,9 +205,8 @@ mod tests {
         "AUTH_CLIENT_SECRET": "devel1234",
         "AUTH_USERNAME_FIELD": "preferred_username",
         "AUTH_GROUPS_FIELD": "groups",
-        "FLASK_APP": "vsm.py",
         "ENV": "development",
-        "FLASK_SECRET": "itsasecret"
+        "SESSION_SECRET": "itsasecret"
     }"#;
 
     const REFERENCE_MAPPINGS: &str = r#"[

@@ -39,7 +39,7 @@ const SESSION_ID_BYTES: usize = 16;
 /// `cookie::Key` needs exactly 64 bytes of keying material.
 const SIGNING_KEY_BYTES: usize = 64;
 
-/// Domain separation for the HKDF expansion of `FLASK_SECRET`.
+/// Domain separation for the HKDF expansion of `SESSION_SECRET`.
 const SIGNING_KEY_INFO: &[u8] = b"vsm session cookie signing key v1";
 
 /// The token set stored in Redis under the session UUID.
@@ -294,7 +294,7 @@ pub fn is_expired(record: &TokenRecord, now: f64) -> bool {
 }
 
 /// Derives the 64-byte `cookie::Key` used by the signed cookie jar from
-/// `FLASK_SECRET`, so every replica sharing the secret accepts the same
+/// `SESSION_SECRET`, so every replica sharing the secret accepts the same
 /// cookies. Changing `SIGNING_KEY_INFO` invalidates existing cookies.
 pub fn signing_key(secret: &str) -> cookie::Key {
     let hkdf = Hkdf::<Sha256>::new(None, secret.as_bytes());

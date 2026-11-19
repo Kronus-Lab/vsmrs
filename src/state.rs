@@ -22,6 +22,6 @@ pub struct AppState {
 
 impl FromRef<AppState> for Key {
     fn from_ref(state: &AppState) -> Self {
-        crate::session::signing_key(&state.config.flask_secret)
+        crate::session::signing_key(&state.config.session_secret)
     }
 }

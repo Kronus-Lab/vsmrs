@@ -189,7 +189,7 @@ mod tests {
     use crate::session::{new_uuid, MemoryStore, SessionStore, TokenRecord};
     use crate::state::AppState;
 
-    const TEST_FLASK_SECRET: &str = "itsasecret";
+    const TEST_SESSION_SECRET: &str = "itsasecret";
     const TEST_HOSTNAME: &str = "localhost";
     const TEST_VAULT_URL: &str = "http://hcv.local.kronus.network";
 
@@ -216,7 +216,7 @@ mod tests {
 
     fn test_config(vault_url: &str) -> AppConfig {
         AppConfig {
-            flask_secret: TEST_FLASK_SECRET.to_owned(),
+            session_secret: TEST_SESSION_SECRET.to_owned(),
             env: "development".to_owned(),
             hostname: TEST_HOSTNAME.to_owned(),
             redis_host: "localhost".to_owned(),
@@ -266,7 +266,7 @@ mod tests {
 
     fn signed_value(uuid: &str) -> String {
         let mut jar = cookie::CookieJar::new();
-        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(TEST_FLASK_SECRET));
+        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(TEST_SESSION_SECRET));
         signed_jar.add((String::from("session"), uuid.to_owned()));
 
         jar.get("session")

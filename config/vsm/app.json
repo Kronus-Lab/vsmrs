@@ -8,7 +8,6 @@
     "AUTH_CLIENT_SECRET": "devel1234",
     "AUTH_USERNAME_FIELD": "preferred_username",
     "AUTH_GROUPS_FIELD": "groups",
-    "FLASK_APP": "vsm.py",
     "ENV": "development",
-    "FLASK_SECRET": "itsasecret"    
+    "SESSION_SECRET": "itsasecret"    
 }

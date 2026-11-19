@@ -256,7 +256,7 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
-            flask_secret: "itsasecret".to_owned(),
+            session_secret: "itsasecret".to_owned(),
             env: "development".to_owned(),
             hostname: "localhost".to_owned(),
             redis_host: "localhost".to_owned(),
@@ -346,7 +346,7 @@ mod tests {
         router.oneshot(request).await.expect("handler responds")
     }
 
-    /// Signs a cookie value with the key the router derives from FLASK_SECRET.
+    /// Signs a cookie value with the key the router derives from SESSION_SECRET.
     fn signed_cookie_value(name: &str, value: &str) -> String {
         let mut jar = cookie::CookieJar::new();
         jar.signed_mut(&crate::session::signing_key("itsasecret"))
