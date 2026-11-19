@@ -23,7 +23,9 @@ async fn index_lists_allowed_servers() {
     let mut s = TestSession::new(Some(&base_url()));
     let mut idp = TestSession::new(None);
     support::login(&mut s, &mut idp).await;
-    let body = s.get("/").await.text().await.unwrap();
+    let response = s.get("/").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response.text().await.unwrap();
     assert!(body.contains("Logged in as: testuser"));
     assert!(body.contains("Download VPN Server Configuration"));
     for server in ["myserver", "myserver2", "myserver3"] {
