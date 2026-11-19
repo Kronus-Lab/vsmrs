@@ -50,6 +50,13 @@ else
     cache_kind="named Docker volumes"
 fi
 
+# An un-smudged Git LFS pointer would be embedded as if it were the real asset.
+# Reject it before compiling instead of shipping a broken binary.
+if grep -r -l '^version https://git-lfs' static/ >/dev/null 2>&1; then
+    echo "error: static/ contains un-smudged Git LFS pointer files; run: git lfs install && git lfs pull" >&2
+    exit 1
+fi
+
 echo "==> Compiling static $TARGET binary in $BUILDER_IMAGE into $ROOT/dist/vsm (using $cache_kind)"
 # The repository is mounted read-only so the host tree is never polluted by
 # root-owned build artifacts. --locked makes an out-of-date Cargo.lock fail

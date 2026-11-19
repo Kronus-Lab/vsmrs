@@ -65,6 +65,26 @@ mod tests {
     fn logo_is_embedded_for_diskless_runtime() {
         let asset = EmbeddedAssets::get("logo.png").expect("logo.png is embedded");
         assert!(!asset.data.is_empty());
+        assert!(
+            asset.data.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "logo.png does not have PNG magic bytes"
+        );
+        assert!(
+            asset.data.len() >= 1024,
+            "logo.png is unexpectedly small: {} bytes",
+            asset.data.len()
+        );
+    }
+
+    #[test]
+    fn embedded_assets_are_not_lfs_pointers() {
+        for path in EmbeddedAssets::iter() {
+            let asset = EmbeddedAssets::get(&path).expect("iterated asset is readable");
+            assert!(
+                !asset.data.starts_with(b"version https://git-lfs"),
+                "asset {path} is an un-smudged Git LFS pointer"
+            );
+        }
     }
 
     #[test]
