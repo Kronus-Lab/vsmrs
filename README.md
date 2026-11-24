@@ -137,9 +137,9 @@ file dist/vsm                 # statically linked
 ```
 
 Integration tests are black-box HTTP tests against the real stack. Bootstrap
-order is Redis → Keycloak → Vault → Terraform → VSM → tests. `npm test` runs
+order is Redis → Keycloak → Vault → OpenTofu → VSM → tests. `npm test` runs
 `cargo test --test integration -- --ignored`; its `pretest`/`posttest` hooks
-bring the compose stack and Terraform fixtures up and down
+bring the compose stack and OpenTofu fixtures up and down
 (`./test/presetup/setup.sh integration` and `./test/presetup/cleanup.sh`). The
 tests expect a **running VSM** reachable at `VSM_BASE_URL` (default
 `http://localhost:3000`) — they never start the binary themselves. For a local
@@ -154,7 +154,7 @@ Or drive each step explicitly:
 ```sh
 docker compose -f docker-compose-common.yml -f docker-compose-integration.yml up -d
 ./test/presetup/wait.sh
-(cd test/presetup && terraform init --upgrade && terraform apply --auto-approve)
+(cd test/presetup && tofu init --upgrade && tofu apply --auto-approve)
 cargo build --release
 ./target/release/vsm &
 VSM_BASE_URL=http://localhost:3000 cargo test --test integration -- --ignored
@@ -162,7 +162,7 @@ VSM_BASE_URL=http://localhost:3000 cargo test --test integration -- --ignored
 
 End-to-end tests use the e2e overlay (which supplies the VSM backend and
 HAProxy host routing) and the `kr0nus/vsm:devel` image. With the LFS-resolved
-logo and Terraform state applied, run both browsers and clean generated files
+logo and OpenTofu state applied, run both browsers and clean generated files
 between runs:
 
 ```sh

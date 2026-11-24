@@ -16,12 +16,12 @@
 - `ENV=development` flips tracing to debug, HTTP redirect URIs, Vault TLS verification, and cookie `Secure`/`Domain` at once — never in production.
 - Redis DB 0 holds token records keyed by a 32-hex session UUID with a TTL, plus one-time `oidc:<state>` pending logins (10-minute TTL). Expiry is read-time (`expires_at > now`) and expired keys are deleted on read.
 - Missing username or groups claim → `500`; unknown/denied server → `403` and no Vault call; unauthenticated API call → `401`.
-- Vault metadata is validated before insertion into the OVPN template; cert CN is the username, TTL from the Vault role (8 h in the reference Terraform).
-- Bootstrap order: Redis → Keycloak → Vault → `terraform apply` → VSM → tests. `*.local.kronus.network` hosts resolve to the stack; HAProxy routes by `Host`; only the e2e compose has a VSM backend.
+- Vault metadata is validated before insertion into the OVPN template; cert CN is the username, TTL from the Vault role (8 h in the reference OpenTofu).
+- Bootstrap order: Redis → Keycloak → Vault → `tofu apply` → VSM → tests. `*.local.kronus.network` hosts resolve to the stack; HAProxy routes by `Host`; only the e2e compose has a VSM backend.
 
 ## Verification targets
 - Static (`npm run lint`): `cargo fmt --check`, then `cargo clippy --all-targets -- -D warnings`.
 - Unit and analysis: `npm run test:unit` (`cargo test`), `npm run audit` (`cargo audit`), `npm run license` (`cargo deny check licenses`), `npm run coverage` (`cargo llvm-cov --html`).
-- Integration: bring up `docker-compose-common.yml` + `docker-compose-integration.yml`, run `./test/presetup/wait.sh`, then `terraform init --upgrade && terraform apply --auto-approve` in `test/presetup`, start the release binary, and run `VSM_BASE_URL=http://localhost:3000 npm test` (`cargo test --test integration -- --ignored`). The 12 black-box HTTP tests are marked `#[ignore = "requires the integration stack"]`.
+- Integration: bring up `docker-compose-common.yml` + `docker-compose-integration.yml`, run `./test/presetup/wait.sh`, then `tofu init --upgrade && tofu apply --auto-approve` in `test/presetup`, start the release binary, and run `VSM_BASE_URL=http://localhost:3000 npm test` (`cargo test --test integration -- --ignored`). The 12 black-box HTTP tests are marked `#[ignore = "requires the integration stack"]`.
 - E2E: `docker-compose-common.yml` + `docker-compose-e2e.yml`, image `kr0nus/vsm:devel`, Cypress `cypress/e2e/vsm.cy.js` in Chrome and Firefox; delete `cypress/screenshots` and `cypress/downloads` between runs.
 - Image build: `npm run build` (`scripts/build-image.sh`) compiles the static musl binary in a pinned `rust:1-alpine` builder container into `dist/vsm`; the `FROM scratch` image only packages that file and the context contains only `dist/vsm`. No host musl toolchain is needed. The toolchain, crate registry and target dir are cached in `vsm-rustup`/`vsm-cargo`/`vsm-build-cache` (or under `VSM_CACHE_DIR`); Cargo and rustup invalidate per dependency/toolchain change, and `--locked` makes a stale lockfile fail instead of silently re-resolving.

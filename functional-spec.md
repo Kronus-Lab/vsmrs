@@ -90,7 +90,7 @@ Required keys: `hostname`, `port`, `protocol`, `server_dn`, `cipher`, `digest`, 
 
 Scalar keys (`hostname`, `port`, `protocol`, `server_dn`, `cipher`, `digest`) must be non-empty, free of CR/LF and OVPN tag strings, and `server_dn` must not contain unbalanced quotes. `certificate_authority` and `server_tls_key` are multi-line PEM blobs: CRLF is normalized to LF, matching PEM BEGIN/END markers are required, closing OVPN tags and directive-looking lines are rejected. Invalid metadata aborts the download as an upstream failure before rendering.
 
-### 4.4 Vault reference configuration (Terraform in `test/presetup/main.tf`)
+### 4.4 Vault reference configuration (OpenTofu in `test/presetup/main.tf`)
 
 - Keycloak realm `devel` with a development "always good" browser flow, user `testuser` in group `example`, confidential client `vsm` with redirect URIs `http://vsm.local.kronus.network/*` and `http://localhost/*`, group-membership mapper emitting claim `groups`, and audience mapper for `vsm` in ID and access tokens.
 - Vault JWT backend at `jwt`, role `test-role`, `user_claim=preferred_username`, `groups_claim=groups`, `bound_audiences=["vsm"]`, `bound_claims.groups` bound to the `example` group path, policy `develvpn`, default policy disabled.
@@ -223,7 +223,7 @@ The implementation must satisfy three automated layers:
 1. **Static** (`.github/workflows/test-suite.yml`, also `npm run lint`): `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo audit`, `cargo deny check licenses`. `cargo audit` ignores only `RUSTSEC-2023-0071` per `.cargo/audit.toml`; `deny.toml` holds the license allowlist.
 2. **Integration** (`tests/integration.rs` + `tests/support/mod.rs`): 12 black-box HTTP tests marked `#[ignore = "requires the integration stack"]`, driven by `cargo test --test integration -- --ignored` with `VSM_BASE_URL` (default `http://localhost:3000`). They cover login/logout, portal contents, `whoami`, valid `.ovpn` download, expiry (by rewriting Redis `expires_at`), `401` without a session, and `403` for unknown/denied servers.
 3. **E2E** (`cypress/e2e/vsm.cy.js`): login success with downloaded-file assertions, bad username, unauthenticated API, unknown server, whoami; executed in Chrome and Firefox with an SBOM generated for the image. Delete `cypress/screenshots` and `cypress/downloads` between runs.
-- Test infrastructure is provisioned by `terraform apply --auto-approve` in `test/presetup`; helper scripts `wait.sh`, `setup.sh`, and `cleanup.sh` orchestrate readiness and teardown, and `package.json` wires them into `pretest`/`posttest` and `pree2e`/`poste2e`.
+- Test infrastructure is provisioned by `tofu apply --auto-approve` in `test/presetup`; helper scripts `wait.sh`, `setup.sh`, and `cleanup.sh` orchestrate readiness and teardown, and `package.json` wires them into `pretest`/`posttest` and `pree2e`/`poste2e`.
 
 ## 6. External interface summary
 
@@ -255,7 +255,7 @@ The implementation must satisfy three automated layers:
 | Cookie flags `HttpOnly`, `SameSite=Strict`, `Path=/`, plus `Secure` and `Domain=HOSTNAME` outside development | Implemented |
 | CSRF protection on state-changing POSTs using a per-session token stored in Redis and compared in constant time | Implemented |
 | Duplicate `vpn_server` rejection and fail-fast config validation | Implemented |
-| Vault least privilege (JWT role bound to audience/groups; policy limited to one issue path + one secret path) | Implemented in reference Terraform |
+| Vault least privilege (JWT role bound to audience/groups; policy limited to one issue path + one secret path) | Implemented in reference OpenTofu |
 | Vault metadata validation before template insertion | Implemented |
 | TLS verification toward Vault outside development; embedded roots plus optional mounted CA | Implemented |
 | Development bypasses TLS verification, uses HTTP redirect URIs, enables debug | Implemented — must never be enabled in production |
@@ -283,7 +283,7 @@ The implementation must satisfy three automated layers:
 - Rust `1.88` per `rust-toolchain.toml`, edition 2021; tokio + axum HTTP stack, openidconnect 4 with reqwest/rustls (ring, embedded webpki roots), minijinja templates, rust-embed for compile-time assets, redis async client.
 - Static `x86_64-unknown-linux-musl` binary in a `FROM scratch` image; no dynamic dependencies and no CA bundle at runtime. Config and overrides are mounted, never baked in.
 - Single process; horizontal replicas need only shared Redis and a shared `SESSION_SECRET`.
-- Bootstrap dependency order: Redis, Keycloak, Vault → Terraform provisioning → VSM readiness → tests.
+- Bootstrap dependency order: Redis, Keycloak, Vault → OpenTofu provisioning → VSM readiness → tests.
 - Templates and static assets are overridable by volume mount; license allowlist in `deny.toml`, advisory exception in `.cargo/audit.toml`.
 
 ## 11. Acceptance checklist for an agent team
@@ -324,7 +324,7 @@ These are **not** requirements of the as-built system; treat them as separate ch
 | WP3 | Authorization mapping and identity API (`whoami`) | WP2 |
 | WP4 | Portal UI templates and static assets with CSRF forms | WP3 |
 | WP5 | Vault JWT/KV/PKI integration, metadata validation, and OVPN rendering | WP1, WP3 |
-| WP6 | Docker/Compose/HAProxy/Terraform reference stack | WP1–WP5 |
+| WP6 | Docker/Compose/HAProxy/OpenTofu reference stack | WP1–WP5 |
 | WP7 | Rust integration suite + Cypress E2E + CI | WP2–WP6 |
 | WP8 | Roadmap items (§13) after owner decisions | All |
 

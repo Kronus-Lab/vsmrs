@@ -25,7 +25,7 @@ Pull requests are the best way to propose changes to the codebase (we use [Githu
 4. If your change affects the running service, run the black-box HTTP
    integration suite against the stack. `npm test` runs
    `cargo test --test integration -- --ignored` with its `pretest`/`posttest`
-   hooks managing the compose stack and Terraform fixtures; start the release
+   hooks managing the compose stack and OpenTofu fixtures; start the release
    binary yourself first and point the suite at it:
 
    ```sh
