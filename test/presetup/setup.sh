@@ -17,6 +17,6 @@ cd test/presetup
 # Wait for stack to be up
 ./wait.sh
 
-# Configure using Terraform
-terraform init --upgrade
-terraform apply --auto-approve
+# Configure using OpenTofu
+tofu init --upgrade
+tofu apply --auto-approve
