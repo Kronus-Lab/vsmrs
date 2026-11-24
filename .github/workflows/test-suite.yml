@@ -74,14 +74,16 @@ jobs:
       run: |
         ./test/presetup/wait.sh
 
-    - name: Setup terraform in execution
-      uses: hashicorp/setup-terraform@v3
+    - name: Setup OpenTofu in execution
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: "1.13.10"
 
-    - name: Configure test intrastructure
+    - name: Configure test infrastructure
       run: |
         cd test/presetup
-        terraform init --upgrade
-        terraform apply --auto-approve
+        tofu init --upgrade
+        tofu apply --auto-approve
 
     - name: Wait for Application to be up
       timeout-minutes: 5
@@ -146,14 +148,16 @@ jobs:
       run: |
         ./test/presetup/wait.sh
 
-    - name: Setup terraform in execution
-      uses: hashicorp/setup-terraform@v3
+    - name: Setup OpenTofu in execution
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: "1.13.10"
 
-    - name: Configure test intrastructure
+    - name: Configure test infrastructure
       run: |
         cd test/presetup
-        terraform init --upgrade
-        terraform apply --auto-approve
+        tofu init --upgrade
+        tofu apply --auto-approve
 
     - name: Build release binary
       run: cargo build --release
