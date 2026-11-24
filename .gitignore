@@ -17,7 +17,7 @@ coverage/
 *.crt
 *.key
 
-# Terraform related files
+# OpenTofu/Terraform local state and lock files
 .terraform/
 .terraform.lock.hcl
 # We don't need the state files since we rebuild in memory every new containers

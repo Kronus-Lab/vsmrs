@@ -16,7 +16,7 @@
 - `ENV=development` flips tracing to debug, HTTP redirect URIs, Vault TLS verification, and cookie `Secure`/`Domain` at once — never in production.
 - Redis DB 0 holds token records keyed by a 32-hex session UUID with a TTL, plus one-time `oidc:<state>` pending logins (10-minute TTL). Expiry is read-time (`expires_at > now`) and expired keys are deleted on read.
 - Missing username or groups claim → `500`; unknown/denied server → `403` and no Vault call; unauthenticated API call → `401`.
-- Vault metadata is validated before insertion into the OVPN template; cert CN is the username, TTL from the Vault role (8 h in the reference OpenTofu).
+- Vault metadata is validated before insertion into the OVPN template; cert CN is the username, TTL from the Vault role (8 h in the reference OpenTofu configuration).
 - Bootstrap order: Redis → Keycloak → Vault → `tofu apply` → VSM → tests. `*.local.kronus.network` hosts resolve to the stack; HAProxy routes by `Host`; only the e2e compose has a VSM backend.
 
 ## Verification targets

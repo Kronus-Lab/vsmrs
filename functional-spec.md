@@ -255,7 +255,7 @@ The implementation must satisfy three automated layers:
 | Cookie flags `HttpOnly`, `SameSite=Strict`, `Path=/`, plus `Secure` and `Domain=HOSTNAME` outside development | Implemented |
 | CSRF protection on state-changing POSTs using a per-session token stored in Redis and compared in constant time | Implemented |
 | Duplicate `vpn_server` rejection and fail-fast config validation | Implemented |
-| Vault least privilege (JWT role bound to audience/groups; policy limited to one issue path + one secret path) | Implemented in reference OpenTofu |
+| Vault least privilege (JWT role bound to audience/groups; policy limited to one issue path + one secret path) | Implemented in the reference OpenTofu configuration |
 | Vault metadata validation before template insertion | Implemented |
 | TLS verification toward Vault outside development; embedded roots plus optional mounted CA | Implemented |
 | Development bypasses TLS verification, uses HTTP redirect URIs, enables debug | Implemented — must never be enabled in production |

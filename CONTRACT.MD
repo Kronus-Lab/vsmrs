@@ -83,7 +83,7 @@ Adding a VPN server requires one mapping plus matching Vault metadata/PKI; no co
 
 ### 2.5 Vault KV metadata payload (`data.data`)
 
-Required, non-empty keys: `hostname`, `port`, `protocol`, `server_dn`, `cipher`, `digest`, `certificate_authority`, `server_tls_key`. `port` may be a JSON number (the reference Terraform sets `1194`); all others are strings and `port` is normalized to a string for rendering.
+Required, non-empty keys: `hostname`, `port`, `protocol`, `server_dn`, `cipher`, `digest`, `certificate_authority`, `server_tls_key`. `port` may be a JSON number (the reference OpenTofu configuration sets `1194`); all others are strings and `port` is normalized to a string for rendering.
 
 - Scalar keys (`hostname`, `port`, `protocol`, `server_dn`, `cipher`, `digest`) must not contain CR/LF; `server_dn` must not contain unbalanced quotes.
 - `certificate_authority` and `server_tls_key` are multi-line PEM blobs: CRLF is normalized to LF, matching PEM BEGIN/END markers are required, and closing OVPN tags (`</ca>`, `</cert>`, `</key>`, `</tls-crypt>`) or lines starting with an OVPN directive are rejected.
@@ -166,7 +166,7 @@ authorized(server, groups, mappings) =
 - Issue certificate with `POST /v1/{vault_pki_mountpoint}/issue/client`, body `{"common_name":"<username>"}`; role `client` is implicit in the path.
 - Certificate TTL is governed by the Vault role (`max_ttl` 8 h in the reference stack), not the app.
 - TLS verification enabled outside development; `CUSTOM_VAULT_CA` merged into the embedded root store.
-- Vault least privilege (reference Terraform): JWT role bound to audience `vsm` and group `/example`; policy grants issue on `vpn/devel/issue/client` and read/list on `vpnmeta/data/develmeta`.
+- Vault least privilege (reference OpenTofu configuration): JWT role bound to audience `vsm` and group `/example`; policy grants issue on `vpn/devel/issue/client` and read/list on `vpnmeta/data/develmeta`.
 - Vault is contacted **only after authorization succeeds**.
 
 ## 8. Profile rendering contract
@@ -219,8 +219,8 @@ remote-cert-tls server
 - Runtime image `FROM scratch`: binary, numeric user `65532:65532`, `WORKDIR /app`, `EXPOSE 3000`, `ENTRYPOINT ["/vsm"]`. No shell, no `/etc/passwd`, no `ca-certificates`.
 - Config is mounted at `/app/config/vsm`; template/static overrides at `/app/templates` and `/app/static`.
 - Compose layering unchanged: `docker-compose-common.yml` plus either `docker-compose-e2e.yml` (VSM + HAProxy) or `docker-compose-integration.yml` (HAProxy only, tests on host). HAProxy routes by `Host`; only e2e has a `vsm` backend.
-- Bootstrap order unchanged: Redis → Keycloak → Vault → Terraform → VSM → tests.
-- Working base is the upstream tree at SHA `8ea0424d5e0b95e9e4f693582e7e84900dba4de3`; Compose/HAProxy/Terraform/templates/test suites are edited in place, not recreated from prose.
+- Bootstrap order unchanged: Redis → Keycloak → Vault → OpenTofu → VSM → tests.
+- Working base is the upstream tree at SHA `8ea0424d5e0b95e9e4f693582e7e84900dba4de3`; Compose/HAProxy/OpenTofu/templates/test suites are edited in place, not recreated from prose.
 
 ## 11. Verification contract
 
