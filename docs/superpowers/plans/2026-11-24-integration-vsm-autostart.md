@@ -26,8 +26,7 @@
 
 - Leftover VSM from a failed run holds port 3000 → next run's binary cannot bind; `pretest` teardown must kill it (Task 2 steps 1–4).
 - Stale `vsm.pid` pointing at a dead process → cleanup must still succeed and remove the files (Task 2 step 5).
-- `setup.sh` invoked from a foreign CWD → binary must still find `config/vsm/`; root is resolved from the script path, and the failure-path run is launched from `/tmp` to prove it (Task 2 step 7: log must show address-in-use, NOT missing-config).
-- Startup failure (port taken / bad config) → setup exits non-zero and prints `vsm.log`, never silently continues (Task 2 step 7).
+- Startup failure (port taken / bad config) → setup exits non-zero and prints `vsm.log`, never silently continues (Task 2 step 7, run from repo root). `ROOT_DIR` resolution is verified by inspection (`cd "$ROOT_DIR"` before build/start) plus successful config loads in normal runs — the pre-existing compose/tofu lines assume repo-root CWD, so a full foreign-CWD run is out of scope (controller ruling, see SDD ledger).
 - E2e mode must not start a host binary or create `vsm.pid` → verified by inspection of the `MODE` gate + `sh -n` (Task 1 step 3); no e2e stack run needed.
 
 ---
@@ -142,10 +141,10 @@ Expected: exit 0, `vsm.pid` removed, no error output from kill.
 Run: `npm run test` (timeout ≥ 600 s).
 Expected: `12 passed; 0 failed`, and afterwards `pgrep -af 'target/release/vsm'` finds nothing (posttest now cleans up).
 
-- [ ] **Step 7: Failure path + foreign CWD**
+- [ ] **Step 7: Failure path (port 3000 occupied)**
 
 Occupy port 3000: `python3 -m http.server 3000` in background (note its PID).
-Run: `(cd /tmp && sh /home/kronus/Workspace/vsmrs/test/presetup/setup.sh integration)` (timeout ≥ 300 s).
+Run from the REPO ROOT: `./test/presetup/setup.sh integration` (timeout ≥ 300 s).
 Expected: exit 1 after ~60 s of waiting, output ends with `VSM did not become ready; log follows:` and `vsm.log` content showing an address-in-use bind error (NOT a missing-config error — that would mean root resolution is broken).
 Then: kill the python listener, `npm run teardown` (also removes the failed run's `vsm.pid`/`vsm.log`).
 
