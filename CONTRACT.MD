@@ -119,7 +119,7 @@ Invalid metadata is rejected before rendering. The multi-line exemption applies 
 
 **`GET /auth/login`** — Discovers `<AUTH_ISSUER>/.well-known/openid-configuration`; creates a Redis pending-login record with a 10-minute TTL containing `state`, `nonce`, PKCE verifier, and return target; sets a short-lived signed cookie carrying the record id; redirects to `<issuer>/protocol/openid-connect/auth?...`. Authorization request uses `AUTH_CLIENT_ID`, scopes `openid email profile`, `code_verifier`/PKCE `S256`, and redirect URI equal to the absolute URL of the callback route (`http` in development, else `https`).
 
-**`GET /auth/callback`** — Reads `code` and `state`. Verify `state` against the pending record in constant time; mismatch/expiry → `401` login error page, no session created. Token-exchange failure, nonce mismatch, or userinfo failure → the same `401` error page, no session created, details logged. If the provider returns no token at all → `302 /` with no session state. On success, exchange code with PKCE verifier; verify ID token nonce; fetch userinfo. Store token record in Redis under `uuid4`-equivalent 32-char lowercase hex UUID (reuse an existing UUID if the session already has one), set `session["user"]`, redirect `302 /`.
+**`GET /auth/callback`** — Reads `code` and `state`. Verify `state` against the pending record in constant time; mismatch/expiry → `401` login error page, no session created. Token-exchange failure, nonce mismatch, or userinfo failure → the same `401` error page, no session created, details logged. If the provider returns no token at all → `302 /` with no session state. On success, exchange code with PKCE verifier; verify ID token nonce; fetch userinfo. Store token record in Redis under `uuid4`-equivalent 32-char lowercase hex UUID (always a fresh UUID; never reuse an existing session UUID), set `session["user"]`, redirect `302 /`. If the request carried a live session cookie, delete its Redis record after the new record is stored; a failed store leaves the old session untouched.
 
 **`GET /auth/logout`** — `405` with `Allow: POST`. No state change.
 
@@ -248,10 +248,13 @@ remote-cert-tls server
 | 13 | Startup trust log | `certifi` path | embedded roots (+ inline or mounted custom CA) | Scratch has no CA bundle | Update log assertion |
 | 14 | Templates/logo | loaded from disk | embedded defaults with mount override | Minimal image | New override test |
 | 15 | Stack/language | Python/Flask, Chainguard image | static Rust binary, scratch | Owner goal | New image checks |
+| 16 | Session UUID on relogin | original §3.3 reused a live session's UUID | fresh UUID every callback; previous session record deleted after the new one is stored | session-fixation defense (OWASP ASVS V3.2.1); owner decision 2026-11-26, Tier 2 finding #8 | ignored reuse test replaced by rotation tests |
 
 ## 13. Decisions recorded and deferred
 
 **Owner decisions:** Rust; static scratch image; memory safety; full clean-up (§12 is authoritative); modify the upstream tree at SHA `8ea0424d5e0b95e9e4f693582e7e84900dba4de3` in place.
+
+- 2026-11-26: §3.3 amended — the session UUID rotates on every successful login and the previous session is invalidated (Tier 2 audit finding #8). UUID reuse is prohibited.
 
 **Implementation calls (not owner approvals):**
 

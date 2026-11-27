@@ -137,6 +137,14 @@ pub async fn callback(
         return PageError(AppError::Internal).into_response();
     }
 
+    // Rotate: invalidate the previous session only after the new record is
+    // safely stored, so a failed put cannot destroy a live session.
+    if let Some(old) = jar.get("session") {
+        if old.value() != uuid {
+            state.store.delete(old.value()).await;
+        }
+    }
+
     let cookie = build_session_cookie(state.config.is_development(), &state.config.hostname, &uuid);
     // Clear the pending proof only once a session has been issued, so the
     // cookie and the one-shot Redis record cannot be replayed.
@@ -372,6 +380,55 @@ mod tests {
             .body(Body::empty())
             .expect("valid request");
         router.oneshot(request).await.expect("handler responds")
+    }
+
+    /// Sends one `Cookie` header with several signed cookies and a raw body,
+    /// mirroring the form POST the browser sends for logout.
+    async fn send_with_cookies_and_body(
+        router: Router,
+        method: Method,
+        uri: &str,
+        cookies: &[(&str, &str)],
+        body: &str,
+    ) -> Response {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if !cookies.is_empty() {
+            let header_value = cookies
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            builder = builder.header(header::COOKIE, header_value);
+        }
+        let request = builder
+            .body(Body::from(body.to_owned()))
+            .expect("valid request");
+        router.oneshot(request).await.expect("handler responds")
+    }
+
+    fn set_cookies(response: &Response) -> Vec<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().expect("cookie header is text").to_owned())
+            .collect()
+    }
+
+    fn token_record(expires_at: f64) -> TokenRecord {
+        TokenRecord {
+            access_token: "access-token-value".to_owned(),
+            expires_at,
+            userinfo: serde_json::json!({
+                "preferred_username": "testuser",
+                "groups": ["/example"],
+            }),
+            csrf_token: "csrf-token-value".to_owned(),
+        }
+    }
+
+    fn unix_now() -> f64 {
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos() as f64 / 1_000_000_000.0
     }
 
     #[tokio::test]
@@ -750,5 +807,496 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("/")
         );
+    }
+
+    #[tokio::test]
+    async fn logout_with_wrong_csrf_token_is_forbidden_and_preserves_session() {
+        let store = Arc::new(CountingStore::new());
+        let uuid = "session-with-wrong-csrf";
+        store
+            .put(uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+        let cookie = signed_cookie_value("session", uuid);
+
+        let response = send_with_cookies_and_body(
+            app(store.clone()),
+            Method::POST,
+            "/auth/logout",
+            &[("session", &cookie)],
+            "csrf_token=not-the-csrf-token",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            set_cookies(&response).is_empty(),
+            "a rejected logout must not clear the session cookie"
+        );
+        assert!(
+            store.get(uuid).await.is_some(),
+            "a rejected logout must preserve the token record"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_without_csrf_token_is_forbidden() {
+        let store = Arc::new(CountingStore::new());
+        let uuid = "session-without-csrf";
+        store
+            .put(uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+        let cookie = signed_cookie_value("session", uuid);
+
+        // Both a form without the field and an entirely empty body fail.
+        for body in ["other=value", ""] {
+            let response = send_with_cookies_and_body(
+                app(store.clone()),
+                Method::POST,
+                "/auth/logout",
+                &[("session", &cookie)],
+                body,
+            )
+            .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "unexpected status for body {body:?}"
+            );
+            assert!(set_cookies(&response).is_empty());
+            assert!(store.get(uuid).await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn logout_with_valid_csrf_deletes_record_and_clears_cookie() {
+        let store = Arc::new(CountingStore::new());
+        let uuid = "session-with-valid-csrf";
+        store
+            .put(uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+        let cookie = signed_cookie_value("session", uuid);
+
+        let response = send_with_cookies_and_body(
+            app(store.clone()),
+            Method::POST,
+            "/auth/logout",
+            &[("session", &cookie)],
+            "csrf_token=csrf-token-value",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/")
+        );
+        let cookies = set_cookies(&response);
+        assert!(
+            cookies
+                .iter()
+                .any(|value| value.starts_with("session=") && value.contains("Max-Age=0")),
+            "logout must clear the session cookie: {cookies:?}"
+        );
+        assert!(
+            store.get(uuid).await.is_none(),
+            "logout must delete the token record"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_with_missing_or_expired_session_is_idempotent() {
+        let store = Arc::new(CountingStore::new());
+
+        // A signed cookie with no matching store record is treated as logged out.
+        let missing_uuid = "session-with-no-record";
+        let missing_cookie = signed_cookie_value("session", missing_uuid);
+        let response = send_with_cookies_and_body(
+            app(store.clone()),
+            Method::POST,
+            "/auth/logout",
+            &[("session", &missing_cookie)],
+            "",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/")
+        );
+        assert!(set_cookies(&response).is_empty());
+
+        // An expired record is invisible to the store, so even a wrong CSRF
+        // token cannot make this anything other than a no-op redirect.
+        let expired_uuid = "session-with-expired-record";
+        store
+            .put(expired_uuid, &token_record(unix_now() - 1.0), 60)
+            .await
+            .expect("seed succeeds");
+        let expired_cookie = signed_cookie_value("session", expired_uuid);
+        let response = send_with_cookies_and_body(
+            app(store.clone()),
+            Method::POST,
+            "/auth/logout",
+            &[("session", &expired_cookie)],
+            "csrf_token=not-the-csrf-token",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/")
+        );
+        assert!(set_cookies(&response).is_empty());
+        assert!(store.get(expired_uuid).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn callback_rejects_replayed_pending_login() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            1,
+        )
+        .await;
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+        let router = app_with_provider(store.clone(), &server).await;
+        let cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+        let uri = "/auth/callback?state=good-state&code=some-code";
+
+        let first = send_with_cookie(
+            router.clone(),
+            Method::GET,
+            uri,
+            PENDING_COOKIE_NAME,
+            &cookie,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::FOUND);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 1);
+
+        let replay = send_with_cookie(router, Method::GET, uri, PENDING_COOKIE_NAME, &cookie).await;
+
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            set_cookies(&replay).is_empty(),
+            "a replay must not issue a session cookie"
+        );
+        assert_eq!(
+            store.puts.load(Ordering::SeqCst),
+            1,
+            "a replay must not create a second session"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn callback_rejects_expired_pending_login() {
+        let store = Arc::new(CountingStore::new());
+        store
+            .put_pending(
+                "oidc:good-state",
+                &PendingLogin {
+                    state: "good-state".to_owned(),
+                    nonce: "some-nonce".to_owned(),
+                    pkce_verifier: "some-verifier".to_owned(),
+                },
+                0,
+            )
+            .await;
+        // `MemoryStore` enforces a minimum TTL of one second, so let it lapse.
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+
+        let response = send_with_cookie(
+            app(store.clone()),
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            PENDING_COOKIE_NAME,
+            &signed_cookie_value(PENDING_COOKIE_NAME, "good-state"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).is_empty());
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn callback_with_pending_cookie_but_no_state_is_rejected() {
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+
+        let response = send_with_cookie(
+            app(store.clone()),
+            Method::GET,
+            "/auth/callback?code=some-code",
+            PENDING_COOKIE_NAME,
+            &signed_cookie_value(PENDING_COOKIE_NAME, "good-state"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).is_empty());
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+        assert!(
+            store.inner.take_pending("oidc:good-state").await.is_some(),
+            "the missing-state branch must not consume the pending login"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_without_code_redirects_and_consumes_pending_login() {
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+
+        let response = send_with_cookie(
+            app(store.clone()),
+            Method::GET,
+            "/auth/callback?state=good-state",
+            PENDING_COOKIE_NAME,
+            &signed_cookie_value(PENDING_COOKIE_NAME, "good-state"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/")
+        );
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+        assert!(
+            store.inner.take_pending("oidc:good-state").await.is_none(),
+            "the pending login must be consumed even when no code is returned"
+        );
+    }
+
+    /// CONTRACT.MD §3.3: every callback mints a fresh session UUID and invalidates the session named by the incoming cookie (Tier 2 #8).
+    #[tokio::test]
+    async fn callback_rotates_session_uuid_and_deletes_old_session() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            1,
+        )
+        .await;
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+        let existing_uuid = "existing-session-uuid";
+        store
+            .put(existing_uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+
+        let pending_cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+        let session_cookie = signed_cookie_value("session", existing_uuid);
+        let cookies: [(&str, &str); 2] = [
+            (PENDING_COOKIE_NAME, &pending_cookie),
+            ("session", &session_cookie),
+        ];
+
+        let puts_before = store.puts.load(Ordering::SeqCst);
+        let response = send_with_cookies_and_body(
+            app_with_provider(store.clone(), &server).await,
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            &cookies,
+            "",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let issued = set_cookies(&response)
+            .into_iter()
+            .find(|value| value.starts_with("session="))
+            .expect("callback issues a session cookie");
+        let pair = issued.split(';').next().expect("cookie pair");
+        let value = pair.strip_prefix("session=").expect("session value");
+        let new_uuid = &value[value.len() - 32..];
+        assert_ne!(
+            new_uuid, existing_uuid,
+            "the callback must mint a fresh UUID"
+        );
+        assert!(
+            store.get(new_uuid).await.is_some(),
+            "the new session record must be stored"
+        );
+        assert!(
+            store.get(existing_uuid).await.is_none(),
+            "the previous session must be invalidated"
+        );
+        assert_eq!(
+            store.puts.load(Ordering::SeqCst),
+            puts_before + 1,
+            "the callback must store exactly one token record"
+        );
+        server.verify().await;
+    }
+
+    /// A signed cookie naming an already-expired or deleted session must not
+    /// break a fresh login: deleting a missing record is a no-op.
+    #[tokio::test]
+    async fn callback_with_stale_session_cookie_still_succeeds() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            1,
+        )
+        .await;
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+        // No record is seeded for this UUID.
+        let stale_uuid = "gone-session-uuid";
+
+        let pending_cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+        let session_cookie = signed_cookie_value("session", stale_uuid);
+        let cookies: [(&str, &str); 2] = [
+            (PENDING_COOKIE_NAME, &pending_cookie),
+            ("session", &session_cookie),
+        ];
+
+        let puts_before = store.puts.load(Ordering::SeqCst);
+        let response = send_with_cookies_and_body(
+            app_with_provider(store.clone(), &server).await,
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            &cookies,
+            "",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let issued = set_cookies(&response)
+            .into_iter()
+            .find(|value| value.starts_with("session="))
+            .expect("callback issues a session cookie");
+        let pair = issued.split(';').next().expect("cookie pair");
+        let value = pair.strip_prefix("session=").expect("session value");
+        let new_uuid = &value[value.len() - 32..];
+        assert_ne!(new_uuid, stale_uuid);
+        assert!(
+            store.get(new_uuid).await.is_some(),
+            "the new session record must be stored"
+        );
+        assert_eq!(
+            store.puts.load(Ordering::SeqCst),
+            puts_before + 1,
+            "the callback must store exactly one token record"
+        );
+        server.verify().await;
+    }
+
+    /// A store whose token-record write always fails, to prove the old
+    /// session is only deleted after a successful put.
+    struct FailPutStore(CountingStore);
+
+    #[async_trait]
+    impl SessionStore for FailPutStore {
+        async fn get(&self, uuid: &str) -> Option<TokenRecord> {
+            self.0.get(uuid).await
+        }
+
+        async fn put(&self, _uuid: &str, _record: &TokenRecord, _ttl_secs: u64) -> Result<()> {
+            Err(anyhow::anyhow!("token record store failed"))
+        }
+
+        async fn delete(&self, uuid: &str) {
+            self.0.delete(uuid).await;
+        }
+
+        async fn put_pending(&self, id: &str, pending: &PendingLogin, ttl_secs: u64) {
+            self.0.put_pending(id, pending, ttl_secs).await;
+        }
+
+        async fn take_pending(&self, id: &str) -> Option<PendingLogin> {
+            self.0.take_pending(id).await
+        }
+    }
+
+    /// CONTRACT.MD §3.3: a failed store must leave the current session alive.
+    #[tokio::test]
+    async fn callback_put_failure_preserves_existing_session() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            1,
+        )
+        .await;
+        let store = Arc::new(FailPutStore(CountingStore::new()));
+        seed_pending(&store.0).await;
+        let existing_uuid = "existing-session-uuid";
+        store
+            .0
+            .put(existing_uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+
+        let pending_cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+        let session_cookie = signed_cookie_value("session", existing_uuid);
+        let cookies: [(&str, &str); 2] = [
+            (PENDING_COOKIE_NAME, &pending_cookie),
+            ("session", &session_cookie),
+        ];
+
+        let response = send_with_cookies_and_body(
+            app_with_provider(store.clone(), &server).await,
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            &cookies,
+            "",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            store.get(existing_uuid).await.is_some(),
+            "a failed put must not invalidate the existing session"
+        );
+        server.verify().await;
     }
 }
