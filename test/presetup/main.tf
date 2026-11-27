@@ -105,6 +105,7 @@ resource "keycloak_openid_client" "vsm" {
   valid_redirect_uris     = var.oidc_redirect_urls
   client_secret           = var.oidc_client_secret
   standard_flow_enabled   = true
+  pkce_code_challenge_method = "S256"
 }
 
 resource "keycloak_openid_group_membership_protocol_mapper" "group_membership_mapper" {

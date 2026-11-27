@@ -174,3 +174,68 @@ async fn download_denied_server_is_forbidden() {
     assert!(r.text().await.unwrap().contains("Forbidden"));
     support::logout(&mut s).await;
 }
+
+#[tokio::test]
+#[ignore = "requires the integration stack"]
+async fn keycloak_enforces_pkce() {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let auth_url = "http://kc.local.kronus.network/realms/devel/protocol/openid-connect/auth";
+    let redirect_uri = "http://vsm.local.kronus.network/auth/callback";
+    let base_params = [
+        ("client_id", "vsm"),
+        ("response_type", "code"),
+        ("scope", "openid email profile"),
+        ("redirect_uri", redirect_uri),
+        ("state", "pkce-enforcement-probe"),
+        ("nonce", "pkce-enforcement-probe"),
+    ];
+
+    async fn assert_rejected(client: &reqwest::Client, url: reqwest::Url) {
+        let resp = client.get(url).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            302,
+            "invalid-PKCE probe must not reach the login form"
+        );
+        let location = resp.headers()["location"].to_str().unwrap();
+        assert!(location.starts_with("http://vsm.local.kronus.network/auth/callback"));
+        assert!(
+            location.contains("error="),
+            "expected OAuth error redirect, got {location}"
+        );
+        assert!(
+            !location.contains("code="),
+            "no authorization code may be issued"
+        );
+    }
+
+    // Probe 1: no code_challenge at all.
+    let url = reqwest::Url::parse_with_params(auth_url, base_params).unwrap();
+    assert_rejected(&client, url).await;
+
+    // Probe 2: downgrade to plain — S256 is the only permitted method.
+    let mut plain = base_params.to_vec();
+    plain.push((
+        "code_challenge",
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    ));
+    plain.push(("code_challenge_method", "plain"));
+    let url = reqwest::Url::parse_with_params(auth_url, plain).unwrap();
+    assert_rejected(&client, url).await;
+
+    // Positive control: valid S256 challenge reaches the login form.
+    // Challenge = S256 of RFC 7636 App. B verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".
+    let mut s256 = base_params.to_vec();
+    s256.push((
+        "code_challenge",
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    ));
+    s256.push(("code_challenge_method", "S256"));
+    let url = reqwest::Url::parse_with_params(auth_url, s256).unwrap();
+    let resp = client.get(url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.text().await.unwrap().contains("kc-login"));
+}
