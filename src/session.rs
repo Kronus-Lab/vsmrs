@@ -71,8 +71,10 @@ pub trait SessionStore: Send + Sync {
     /// Stores `record` under `uuid` with a `ttl_secs` Redis TTL.
     async fn put(&self, uuid: &str, record: &TokenRecord, ttl_secs: u64) -> anyhow::Result<()>;
 
-    /// Removes `uuid`, if present. Used by logout.
-    async fn delete(&self, uuid: &str);
+    /// Removes `uuid`, if present. Errors are returned to the caller so a
+    /// logout or session rotation is never reported as successful while the
+    /// old record is still live.
+    async fn delete(&self, uuid: &str) -> anyhow::Result<()>;
 
     /// Stores one-time login state under `id`, which is the full key the
     /// caller namespaces as `oidc:<random>`, with a `ttl_secs` TTL.
@@ -124,7 +126,11 @@ impl SessionStore for RedisStore {
         if is_expired(&record, unix_now()) {
             // The TTL should have removed this already; delete it anyway so a
             // clock skew or an externally written key cannot keep it alive.
-            self.delete(uuid).await;
+            // Cleanup is best-effort: an expired record is never treated as a
+            // valid session, even when Redis refuses the delete.
+            if let Err(error) = self.delete(uuid).await {
+                tracing::warn!(%error, "failed to delete expired session record");
+            }
             return None;
         }
 
@@ -143,10 +149,14 @@ impl SessionStore for RedisStore {
         Ok(())
     }
 
-    async fn delete(&self, uuid: &str) {
+    async fn delete(&self, uuid: &str) -> anyhow::Result<()> {
         let mut connection = self.connection.clone();
-        if let Err(error) = connection.del::<_, ()>(uuid).await {
-            tracing::warn!(%error, "failed to delete session record");
+        match connection.del::<_, ()>(uuid).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%error, "failed to delete session record");
+                Err(error.into())
+            }
         }
     }
 
@@ -266,8 +276,9 @@ impl SessionStore for MemoryStore {
         Ok(())
     }
 
-    async fn delete(&self, uuid: &str) {
+    async fn delete(&self, uuid: &str) -> anyhow::Result<()> {
         memory_remove(&self.tokens, uuid);
+        Ok(())
     }
 
     async fn put_pending(&self, id: &str, pending: &PendingLogin, ttl_secs: u64) {
@@ -492,7 +503,10 @@ mod tests {
         assert_eq!(loaded.userinfo, record.userinfo);
         assert_eq!(loaded.csrf_token, record.csrf_token);
 
-        store.delete("uuid").await;
+        store
+            .delete("uuid")
+            .await
+            .expect("memory store delete succeeds");
         assert!(store.get("uuid").await.is_none());
 
         let pending = pending_login();

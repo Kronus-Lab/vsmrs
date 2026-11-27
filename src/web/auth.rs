@@ -140,8 +140,13 @@ pub async fn callback(
     // Rotate: invalidate the previous session only after the new record is
     // safely stored, so a failed put cannot destroy a live session.
     if let Some(old) = jar.get("session") {
-        if old.value() != uuid {
-            state.store.delete(old.value()).await;
+        if old.value() != uuid && state.store.delete(old.value()).await.is_err() {
+            // The new record must not survive a failed rotation: without this
+            // rollback a rejected callback could still be replayed with the
+            // issued cookie.
+            let _ = state.store.delete(&uuid).await;
+            debug!("session rotation failed");
+            return PageError(AppError::Internal).into_response();
         }
     }
 
@@ -174,7 +179,12 @@ pub async fn logout(State(state): State<AppState>, jar: SignedCookieJar, body: B
         return PageError(AppError::BadCsrf).into_response();
     }
 
-    state.store.delete(&uuid).await;
+    if let Err(error) = state.store.delete(&uuid).await {
+        // Keep the cookie and report the failure: otherwise the browser would
+        // drop a session that is still live in Redis.
+        tracing::warn!(%error, "failed to delete session on logout");
+        return PageError(AppError::Internal).into_response();
+    }
     let mut removal =
         build_session_cookie(state.config.is_development(), &state.config.hostname, "");
     removal.set_max_age(Duration::ZERO);
@@ -247,8 +257,8 @@ mod tests {
             self.inner.put(uuid, record, ttl_secs).await
         }
 
-        async fn delete(&self, uuid: &str) {
-            self.inner.delete(uuid).await;
+        async fn delete(&self, uuid: &str) -> Result<()> {
+            self.inner.delete(uuid).await
         }
 
         async fn put_pending(&self, id: &str, pending: &PendingLogin, ttl_secs: u64) {
@@ -1238,8 +1248,8 @@ mod tests {
             Err(anyhow::anyhow!("token record store failed"))
         }
 
-        async fn delete(&self, uuid: &str) {
-            self.0.delete(uuid).await;
+        async fn delete(&self, uuid: &str) -> Result<()> {
+            self.0.delete(uuid).await
         }
 
         async fn put_pending(&self, id: &str, pending: &PendingLogin, ttl_secs: u64) {
@@ -1296,6 +1306,205 @@ mod tests {
         assert!(
             store.get(existing_uuid).await.is_some(),
             "a failed put must not invalidate the existing session"
+        );
+        server.verify().await;
+    }
+
+    /// Deletes fail for one chosen key. Every attempted delete is recorded so
+    /// tests can prove that a failed rotation rolled the new record back.
+    struct FailDeleteStore {
+        inner: CountingStore,
+        failing_key: String,
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FailDeleteStore {
+        fn new(failing_key: &str) -> Self {
+            Self {
+                inner: CountingStore::new(),
+                failing_key: failing_key.to_owned(),
+                deleted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deleted(&self) -> Vec<String> {
+            self.deleted
+                .lock()
+                .expect("delete log lock is not poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for FailDeleteStore {
+        async fn get(&self, uuid: &str) -> Option<TokenRecord> {
+            self.inner.get(uuid).await
+        }
+
+        async fn put(&self, uuid: &str, record: &TokenRecord, ttl_secs: u64) -> Result<()> {
+            self.inner.put(uuid, record, ttl_secs).await
+        }
+
+        async fn delete(&self, uuid: &str) -> Result<()> {
+            self.deleted
+                .lock()
+                .expect("delete log lock is not poisoned")
+                .push(uuid.to_owned());
+            if uuid == self.failing_key {
+                return Err(anyhow::anyhow!("session delete failed"));
+            }
+            self.inner.delete(uuid).await
+        }
+
+        async fn put_pending(&self, id: &str, pending: &PendingLogin, ttl_secs: u64) {
+            self.inner.put_pending(id, pending, ttl_secs).await;
+        }
+
+        async fn take_pending(&self, id: &str) -> Option<PendingLogin> {
+            self.inner.take_pending(id).await
+        }
+    }
+
+    /// A failed old-session delete must not issue a cookie or leave the new
+    /// record behind: the user keeps the existing session instead.
+    #[tokio::test]
+    async fn callback_delete_failure_rolls_back_rotation() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            1,
+        )
+        .await;
+        let existing_uuid = "existing-session-uuid";
+        let store = Arc::new(FailDeleteStore::new(existing_uuid));
+        seed_pending(&store.inner).await;
+        store
+            .inner
+            .put(existing_uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+
+        let pending_cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+        let session_cookie = signed_cookie_value("session", existing_uuid);
+        let cookies: [(&str, &str); 2] = [
+            (PENDING_COOKIE_NAME, &pending_cookie),
+            ("session", &session_cookie),
+        ];
+
+        let response = send_with_cookies_and_body(
+            app_with_provider(store.clone(), &server).await,
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            &cookies,
+            "",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .all(|value| !value.starts_with("session=")),
+            "a failed rotation must not issue a session cookie"
+        );
+        assert!(
+            store.get(existing_uuid).await.is_some(),
+            "the old session must survive a failed rotation"
+        );
+        let deleted = store.deleted();
+        assert_eq!(deleted.len(), 2, "old and new records must both be deleted");
+        assert_eq!(deleted[0], existing_uuid);
+        assert_ne!(deleted[1], existing_uuid);
+        assert!(
+            store.get(&deleted[1]).await.is_none(),
+            "the new record must be rolled back"
+        );
+        server.verify().await;
+    }
+
+    /// A failed logout delete must not clear the cookie or report success.
+    #[tokio::test]
+    async fn logout_delete_failure_preserves_session() {
+        let store = Arc::new(FailDeleteStore::new("session-with-failing-delete"));
+        let uuid = "session-with-failing-delete";
+        store
+            .inner
+            .put(uuid, &token_record(unix_now() + 3600.0), 3600)
+            .await
+            .expect("seed succeeds");
+        let cookie = signed_cookie_value("session", uuid);
+
+        let response = send_with_cookies_and_body(
+            app(store.clone()),
+            Method::POST,
+            "/auth/logout",
+            &[("session", &cookie)],
+            "csrf_token=csrf-token-value",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .all(|value| !value.starts_with("session=")),
+            "a failed delete must not clear the session cookie"
+        );
+        assert!(
+            store.get(uuid).await.is_some(),
+            "a failed delete must leave the session live"
+        );
+    }
+
+    /// Userinfo that does not match the verified ID token subject must not
+    /// produce a session at the handler boundary either.
+    #[tokio::test]
+    async fn callback_rejects_userinfo_with_mismatched_subject() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        crate::oidc::test_support::mount_provider_with_userinfo(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": crate::oidc::test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            json!({
+                "sub": "other-subject",
+                "preferred_username": "testuser",
+                "groups": ["/example"],
+            }),
+            1,
+        )
+        .await;
+        let store = Arc::new(CountingStore::new());
+        seed_pending(&store).await;
+        let pending_cookie = signed_cookie_value(PENDING_COOKIE_NAME, "good-state");
+
+        let response = send_with_cookie(
+            app_with_provider(store.clone(), &server).await,
+            Method::GET,
+            "/auth/callback?state=good-state&code=some-code",
+            PENDING_COOKIE_NAME,
+            &pending_cookie,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0, "no session is issued");
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .all(|value| !value.starts_with("session=")),
+            "no session cookie is issued"
         );
         server.verify().await;
     }

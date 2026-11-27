@@ -286,7 +286,7 @@ impl OidcClient {
         let id_token = IdTokenResponse::id_token(&token_response)
             .ok_or_else(|| anyhow!("OIDC token response is missing an ID token"))?;
         let expected_nonce = Nonce::new(nonce.to_owned());
-        id_token
+        let id_claims = id_token
             .claims(&client.id_token_verifier(), &expected_nonce)
             .context("OIDC ID token verification failed")?;
 
@@ -314,6 +314,20 @@ impl OidcClient {
             .json()
             .await
             .context("invalid OIDC userinfo JSON")?;
+
+        // OIDC Core §5.3.2: userinfo is only trustworthy when its `sub`
+        // matches the subject of the verified ID token. Check this before
+        // reading any profile fields, so an attacker cannot swap identities
+        // by serving a different userinfo payload for the same access token.
+        let matching_subject = userinfo
+            .get("sub")
+            .and_then(Value::as_str)
+            .is_some_and(|sub| sub == id_claims.subject().as_str());
+        if !matching_subject {
+            return Err(anyhow!(
+                "OIDC userinfo `sub` does not match the ID token subject"
+            ));
+        }
 
         let username = userinfo
             .get(&self.username_field)
@@ -365,6 +379,8 @@ fn build_http_client() -> Result<reqwest::Client> {
 
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .use_preconfigured_tls(tls)
         .build()
         .context("failed to build OIDC HTTP client")
@@ -466,6 +482,27 @@ pub(crate) mod test_support {
         token_body: Value,
         userinfo_calls: u64,
     ) {
+        mount_provider_with_userinfo(
+            server,
+            token_body,
+            json!({
+                "sub": "test-subject",
+                "preferred_username": "testuser",
+                "groups": ["/example"],
+            }),
+            userinfo_calls,
+        )
+        .await;
+    }
+
+    /// Same fixtures with a caller-supplied userinfo body, so subject-binding
+    /// rejection tests can vary only `sub`.
+    pub(crate) async fn mount_provider_with_userinfo(
+        server: &MockServer,
+        token_body: Value,
+        userinfo_body: Value,
+        userinfo_calls: u64,
+    ) {
         let base = server.uri();
         let issuer = Url::parse(&base).expect("valid issuer").to_string();
         Mock::given(method("GET"))
@@ -494,10 +531,7 @@ pub(crate) mod test_support {
             .await;
         Mock::given(method("GET"))
             .and(path("/userinfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "preferred_username": "testuser",
-                "groups": ["/example"],
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(userinfo_body))
             .expect(userinfo_calls)
             .mount(server)
             .await;
@@ -523,7 +557,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use serde_json::json;
+    use serde_json::{json, Value};
     use url::Url;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -705,6 +739,69 @@ mod tests {
             "unexpected error: {error:#}"
         );
         server.verify().await;
+    }
+
+    /// Runs a full exchange with a valid ID token and the given userinfo
+    /// payload, and asserts the subject-binding check rejects the response.
+    /// The stub is called exactly once: the check reads `sub` before any
+    /// profile field, and no `UserInfo` is returned to the caller.
+    async fn assert_userinfo_subject_rejected(userinfo: Value) {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        test_support::mount_provider_with_userinfo(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": test_support::signed_id_token(&base, "some-nonce"),
+            }),
+            userinfo,
+            1,
+        )
+        .await;
+
+        let config = test_support::config(&base);
+        let client = OidcClient::new(&config).await.expect("discovery succeeds");
+        let error = client
+            .complete("some-code", "some-nonce", "some-verifier")
+            .await
+            .err()
+            .expect("an unbound userinfo response is rejected");
+        assert!(
+            error.to_string().contains("`sub`"),
+            "unexpected error: {error:#}"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_userinfo_without_subject() {
+        assert_userinfo_subject_rejected(json!({
+            "preferred_username": "testuser",
+            "groups": ["/example"],
+        }))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_userinfo_with_mismatched_subject() {
+        assert_userinfo_subject_rejected(json!({
+            "sub": "other-subject",
+            "preferred_username": "testuser",
+            "groups": ["/example"],
+        }))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_userinfo_with_non_string_subject() {
+        assert_userinfo_subject_rejected(json!({
+            "sub": 42,
+            "preferred_username": "testuser",
+            "groups": ["/example"],
+        }))
+        .await;
     }
 
     /// Runs a full exchange against a healthy provider stub whose ID token is

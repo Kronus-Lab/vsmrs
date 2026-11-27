@@ -122,9 +122,9 @@ fn parse_app_config(raw: &Map<String, Value>) -> Result<AppConfig> {
         hostname: required_string(raw, "HOSTNAME")?,
         redis_host: required_string(raw, "REDIS_HOST")?,
         redis_port,
-        vault_url: absolute_url(raw, "VAULT_URL")?,
+        vault_url: absolute_url(raw, "VAULT_URL", !is_development)?,
         custom_vault_ca: optional_string(raw, "CUSTOM_VAULT_CA")?,
-        auth_issuer: absolute_url(raw, "AUTH_ISSUER")?,
+        auth_issuer: absolute_url(raw, "AUTH_ISSUER", !is_development)?,
         auth_client_id: required_string(raw, "AUTH_CLIENT_ID")?,
         auth_client_secret: required_string(raw, "AUTH_CLIENT_SECRET")?,
         auth_username_field: required_string(raw, "AUTH_USERNAME_FIELD")?,
@@ -179,12 +179,16 @@ fn optional_string(raw: &Map<String, Value>, key: &str) -> Result<Option<String>
     }
 }
 
-fn absolute_url(raw: &Map<String, Value>, key: &str) -> Result<Url> {
+fn absolute_url(raw: &Map<String, Value>, key: &str, require_https: bool) -> Result<Url> {
     let text = required_string(raw, key)?;
     let url = Url::parse(&text).with_context(|| format!("`{key}` is not a valid URL: `{text}`"))?;
 
     if !url.has_host() {
         bail!("`{key}` must be an absolute URL with a host: `{text}`");
+    }
+
+    if require_https && url.scheme() != "https" {
+        bail!("`{key}` must use HTTPS when ENV is not development: `{text}`");
     }
 
     Ok(url)
@@ -208,6 +212,25 @@ mod tests {
         "ENV": "development",
         "SESSION_SECRET": "itsasecret"
     }"#;
+
+    /// Production variant of the reference fixture: HTTPS URLs and a
+    /// sufficiently long session secret, so only the scheme is under test.
+    fn production_app() -> String {
+        REFERENCE_APP
+            .replace("\"ENV\": \"development\"", "\"ENV\": \"production\"")
+            .replace(
+                "\"SESSION_SECRET\": \"itsasecret\"",
+                "\"SESSION_SECRET\": \"production-session-secret-0123456789abcdef\"",
+            )
+            .replace(
+                "http://hcv.local.kronus.network",
+                "https://hcv.local.kronus.network",
+            )
+            .replace(
+                "http://kc.local.kronus.network",
+                "https://kc.local.kronus.network",
+            )
+    }
 
     const REFERENCE_MAPPINGS: &str = r#"[
         {
@@ -264,6 +287,67 @@ mod tests {
         assert!(config.is_development());
         assert_eq!(config.auth_username_field, "preferred_username");
         assert_eq!(config.auth_groups_field, "groups");
+    }
+
+    #[test]
+    fn development_allows_http_urls() {
+        let (app_path, mappings_path) =
+            write_fixtures("development-http", REFERENCE_APP, REFERENCE_MAPPINGS);
+
+        let (config, _) = load(&app_path, &mappings_path).expect("development HTTP URLs load");
+
+        assert!(config.is_development());
+        assert_eq!(config.vault_url.scheme(), "http");
+        assert_eq!(config.auth_issuer.scheme(), "http");
+    }
+
+    #[test]
+    fn accepts_https_urls_outside_development() {
+        let app = production_app();
+        let (app_path, mappings_path) =
+            write_fixtures("production-https", &app, REFERENCE_MAPPINGS);
+
+        let (config, _) = load(&app_path, &mappings_path).expect("production HTTPS URLs load");
+
+        assert!(!config.is_development());
+        assert_eq!(config.vault_url.scheme(), "https");
+        assert_eq!(config.auth_issuer.scheme(), "https");
+    }
+
+    #[test]
+    fn rejects_http_vault_url_outside_development() {
+        let app = production_app().replace(
+            "https://hcv.local.kronus.network",
+            "http://hcv.local.kronus.network",
+        );
+        let (app_path, mappings_path) =
+            write_fixtures("production-http-vault", &app, REFERENCE_MAPPINGS);
+
+        let error = load(&app_path, &mappings_path).expect_err("HTTP VAULT_URL is rejected");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("VAULT_URL") && message.contains("HTTPS"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_http_auth_issuer_outside_development() {
+        let app = production_app().replace(
+            "https://kc.local.kronus.network",
+            "http://kc.local.kronus.network",
+        );
+        let (app_path, mappings_path) =
+            write_fixtures("production-http-issuer", &app, REFERENCE_MAPPINGS);
+
+        let error = load(&app_path, &mappings_path).expect_err("HTTP AUTH_ISSUER is rejected");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("AUTH_ISSUER") && message.contains("HTTPS"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

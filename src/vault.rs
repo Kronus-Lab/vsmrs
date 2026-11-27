@@ -6,6 +6,8 @@
 //! which is what lets the binary run in `FROM scratch`. Verification is
 //! disabled only for development.
 
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use url::Url;
@@ -69,7 +71,12 @@ impl VaultClient {
             // Development only; the caller has already checked the environment.
             builder = builder.danger_accept_invalid_certs(true);
         }
+        // Never follow a Vault redirect: a 3xx could replay the JWT body or
+        // the X-Vault-Token header to an attacker-controlled origin.
         let client = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
             .build()
             .context("failed to build the Vault HTTP client")?;
 
@@ -319,6 +326,85 @@ mod tests {
         assert!(certificate.certificate.contains("issued"));
         assert!(certificate.private_key.contains("issued-key"));
         server.verify().await;
+    }
+
+    /// A 307/308 login response must fail locally. Following it would replay
+    /// the JWT body to whatever origin the redirect names.
+    #[tokio::test]
+    async fn jwt_login_does_not_follow_redirect() {
+        for status in [307, 308] {
+            let origin = MockServer::start().await;
+            let destination = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/auth/jwt/login"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/received", destination.uri())),
+                )
+                .expect(1)
+                .mount(&origin)
+                .await;
+            // The cross-origin destination must never see a follow-up request
+            // carrying the login body.
+            Mock::given(method("POST"))
+                .and(path("/received"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "auth": { "client_token": "stolen-token" }
+                })))
+                .expect(0)
+                .mount(&destination)
+                .await;
+
+            let error = client(&origin)
+                .jwt_login("jwt-value", &mapping())
+                .await
+                .expect_err("a Vault redirect is treated as an upstream failure");
+            assert!(
+                format!("{error:#}").contains("JWT login returned HTTP"),
+                "unexpected error: {error:#}"
+            );
+            origin.verify().await;
+            destination.verify().await;
+        }
+    }
+
+    /// A redirected metadata read must fail locally, so X-Vault-Token cannot
+    /// be replayed to the redirect target.
+    #[tokio::test]
+    async fn read_metadata_does_not_follow_redirect() {
+        for status in [307, 308] {
+            let origin = MockServer::start().await;
+            let destination = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/vpnmeta/data/develmeta"))
+                .and(header("X-Vault-Token", "client-token-123"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Location", format!("{}/received", destination.uri())),
+                )
+                .expect(1)
+                .mount(&origin)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/received"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "data": crate::ovpn::test_support::reference_metadata_json() }
+                })))
+                .expect(0)
+                .mount(&destination)
+                .await;
+
+            let error = client(&origin)
+                .read_metadata("client-token-123", &mapping())
+                .await
+                .expect_err("a Vault redirect is treated as an upstream failure");
+            assert!(
+                format!("{error:#}").contains("Vault metadata read returned HTTP"),
+                "unexpected error: {error:#}"
+            );
+            origin.verify().await;
+            destination.verify().await;
+        }
     }
 
     #[test]
