@@ -57,6 +57,41 @@ jobs:
     - name: Build
       run: VSM_CACHE_DIR=$HOME/.cache/vsm-build ./scripts/build-image.sh
 
+    - name: Check binary is statically linked
+      run: |
+        file dist/vsm | tee binary-file.txt
+        grep -q 'statically linked' binary-file.txt
+        # musl static binaries are reported as "not a dynamic executable" by ldd.
+        ldd_output=$(ldd dist/vsm 2>&1 || true)
+        echo "$ldd_output"
+        echo "$ldd_output" | grep -Eq 'not a dynamic executable|statically linked'
+
+    - name: Check scratch image contents
+      run: |
+        container_id=$(docker create kr0nus/vsm:devel)
+        trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+        docker export "$container_id" | tar -t > image-files.txt
+        cat image-files.txt
+        # WORKDIR /app may add a directory entry; /vsm must be the only file.
+        files=$(grep -vE '/$|^\.$' image-files.txt || true)
+        if [ "$files" != "vsm" ]; then
+          echo "unexpected image files (expected only vsm): $files" >&2
+          exit 1
+        fi
+        if grep -Eq '(^|/)(bin/sh|etc/ssl|etc/passwd|ca-certificates|config)(/|$)' image-files.txt; then
+          echo "image contains a shell, CA bundle, or baked-in config" >&2
+          exit 1
+        fi
+
+    - name: Check image runtime user
+      run: |
+        user=$(docker inspect -f '{{.Config.User}}' kr0nus/vsm:devel)
+        echo "Image Config.User: $user"
+        if [ "$user" != "65532:65532" ]; then
+          echo "expected numeric uid/gid 65532:65532, got '$user'" >&2
+          exit 1
+        fi
+
     - name: SBOM
       uses: anchore/sbom-action@v0
       with:
