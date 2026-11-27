@@ -11,13 +11,19 @@ use rust_embed::RustEmbed;
 #[folder = "static/"]
 struct EmbeddedAssets;
 
-/// Returns an asset's bytes, preferring a mounted `static/<path>` file.
-fn asset(path: &str) -> Option<Vec<u8>> {
-    if let Ok(bytes) = std::fs::read(Path::new("static").join(path)) {
+/// Returns an asset's bytes from `root`, preferring a mounted file over the
+/// embedded default.
+fn asset_from(path: &str, root: &Path) -> Option<Vec<u8>> {
+    if let Ok(bytes) = std::fs::read(root.join(path)) {
         return Some(bytes);
     }
 
     EmbeddedAssets::get(path).map(|file| file.data.into_owned())
+}
+
+/// Returns an asset's bytes, preferring the mounted `static/<path>` file.
+fn asset(path: &str) -> Option<Vec<u8>> {
+    asset_from(path, Path::new("static"))
 }
 
 /// Rejects absolute paths and `..` traversal before touching the filesystem.
@@ -93,5 +99,60 @@ mod tests {
         assert!(!safe_name("../Cargo.toml"));
         assert!(!safe_name("/etc/passwd"));
         assert!(!safe_name("nested/../../secret"));
+    }
+
+    /// A uniquely named temp asset root removed on drop, even on panic.
+    struct TempAssetRoot(std::path::PathBuf);
+
+    impl TempAssetRoot {
+        fn new(name: &str, contents: &[u8]) -> Self {
+            let unique = format!(
+                "vsm-static-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock is after the unix epoch")
+                    .as_nanos()
+            );
+            let root = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&root).expect("create static temp root");
+            std::fs::write(root.join(name), contents).expect("write asset override");
+            Self(root)
+        }
+    }
+
+    impl Drop for TempAssetRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn mounted_asset_overrides_embedded_bytes() {
+        let contents = b"mounted logo.png override bytes";
+        let root = TempAssetRoot::new("logo.png", contents);
+
+        let bytes = asset_from("logo.png", &root.0).expect("asset bytes are available");
+        assert_eq!(bytes, contents);
+        assert_ne!(
+            bytes,
+            EmbeddedAssets::get("logo.png")
+                .expect("logo.png is embedded")
+                .data
+                .into_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_asset_returns_not_found() {
+        let name = format!(
+            "missing-asset-{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after the unix epoch")
+                .as_nanos()
+        );
+        let response = file(PathParam(name)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

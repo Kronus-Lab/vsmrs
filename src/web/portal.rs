@@ -169,9 +169,15 @@ mod tests {
     }
 
     fn signed_value(uuid: &str) -> String {
+        signed_value_with_secret(uuid, TEST_SESSION_SECRET)
+    }
+
+    /// Signs a cookie with a secret other than the app's, so the jar sees a
+    /// well-formed signed cookie whose MAC cannot validate.
+    fn signed_value_with_secret(value: &str, secret: &str) -> String {
         let mut jar = cookie::CookieJar::new();
-        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(TEST_SESSION_SECRET));
-        signed_jar.add((String::from("session"), uuid.to_owned()));
+        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(secret));
+        signed_jar.add((String::from("session"), value.to_owned()));
 
         jar.get("session")
             .expect("signed session cookie is present")
@@ -377,5 +383,79 @@ mod tests {
         // The checkout keeps `logo.png` as a Git LFS pointer, so assert the
         // asset bytes are served rather than decoding them here.
         assert!(!bytes.is_empty(), "logo asset must not be empty");
+    }
+
+    /// A record exists under the cookie's UUID, but the cookie was signed with
+    /// a different secret, so the signed jar must drop it before the handler.
+    #[tokio::test]
+    async fn index_tampered_signature_redirects() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let uuid = new_uuid();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as f64;
+        store
+            .put(
+                &uuid,
+                &TokenRecord {
+                    access_token: "access-token-value".to_owned(),
+                    expires_at: now + 3600.0,
+                    userinfo: json!({ "preferred_username": "testuser", "groups": ["/example"] }),
+                    csrf_token: CSRF_TOKEN.to_owned(),
+                },
+                60,
+            )
+            .await
+            .expect("token is stored");
+
+        let cookie = signed_value_with_secret(&uuid, "a-different-secret");
+        let response = send(app(store), Some(&cookie)).await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/auth/login")
+        );
+    }
+
+    #[tokio::test]
+    async fn index_malformed_session_values_redirect() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        for value in ["not-a-uuid", "../../etc/passwd", ""] {
+            let cookie = signed_value(value);
+            let response = send(app(store.clone()), Some(&cookie)).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::FOUND,
+                "malformed cookie value {value:?} must be anonymous"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("/auth/login")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn index_unknown_session_uuid_redirects() {
+        let response = send(
+            app(Arc::new(MemoryStore::new())),
+            Some(&signed_value(&new_uuid())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/auth/login")
+        );
     }
 }

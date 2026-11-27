@@ -265,15 +265,22 @@ mod tests {
     }
 
     fn signed_value(uuid: &str) -> String {
+        signed_value_with_secret(uuid, TEST_SESSION_SECRET)
+    }
+
+    /// Signs a cookie with a secret other than the app's, so the jar sees a
+    /// well-formed signed cookie whose MAC cannot validate.
+    fn signed_value_with_secret(value: &str, secret: &str) -> String {
         let mut jar = cookie::CookieJar::new();
-        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(TEST_SESSION_SECRET));
-        signed_jar.add((String::from("session"), uuid.to_owned()));
+        let mut signed_jar = jar.signed_mut(&crate::session::signing_key(secret));
+        signed_jar.add((String::from("session"), value.to_owned()));
 
         jar.get("session")
             .expect("signed session cookie is present")
             .value()
             .to_owned()
     }
+
     async fn send(router: Router, cookie: Option<String>) -> Response {
         let mut request = Request::builder().uri("/api/whoami");
         if let Some(cookie) = cookie {
@@ -759,5 +766,164 @@ mod tests {
             "body must be a rendered profile: {body}"
         );
         vault.verify().await;
+    }
+
+    /// A record exists under the cookie's UUID, but the cookie was signed with
+    /// a different secret, so the signed jar must drop it before the handler.
+    #[tokio::test]
+    async fn whoami_tampered_signature_is_401() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let uuid = new_uuid();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as f64;
+        store
+            .put(
+                &uuid,
+                &token_record(
+                    json!({ "preferred_username": "testuser", "groups": ["/example"] }),
+                    now + 3600.0,
+                ),
+                60,
+            )
+            .await
+            .expect("token is stored");
+
+        let cookie = signed_value_with_secret(&uuid, "a-different-secret");
+        let response = send(app(store, TEST_VAULT_URL), Some(cookie)).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response_body(response).await,
+            r#"{"error-message":"Not Authenticated"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn download_tampered_signature_is_401_empty() {
+        let vault = MockServer::start().await;
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let uuid = new_uuid();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp() as f64;
+        store
+            .put(
+                &uuid,
+                &token_record(
+                    json!({ "preferred_username": "testuser", "groups": ["/example"] }),
+                    now + 3600.0,
+                ),
+                60,
+            )
+            .await
+            .expect("token is stored");
+
+        let cookie = signed_value_with_secret(&uuid, "a-different-secret");
+        let response = send_download(
+            app(store, &vault.uri()),
+            Some(&cookie),
+            "myserver",
+            CSRF_TOKEN,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response_body(response).await.is_empty());
+        assert!(
+            vault
+                .received_requests()
+                .await
+                .expect("requests are readable")
+                .is_empty(),
+            "a tampered cookie must not reach Vault"
+        );
+    }
+
+    #[tokio::test]
+    async fn whoami_malformed_session_values_are_401() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        for value in ["not-a-uuid", "../../etc/passwd", ""] {
+            let response = send(
+                app(store.clone(), TEST_VAULT_URL),
+                Some(signed_value(value)),
+            )
+            .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "malformed cookie value {value:?} must be anonymous"
+            );
+            assert_eq!(
+                response_body(response).await,
+                r#"{"error-message":"Not Authenticated"}"#
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_malformed_session_values_are_401_empty() {
+        let vault = MockServer::start().await;
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        for value in ["not-a-uuid", "../../etc/passwd", ""] {
+            let cookie = signed_value(value);
+            let response = send_download(
+                app(store.clone(), &vault.uri()),
+                Some(&cookie),
+                "myserver",
+                CSRF_TOKEN,
+            )
+            .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "malformed cookie value {value:?} must be anonymous"
+            );
+            assert!(response_body(response).await.is_empty());
+        }
+        assert!(
+            vault
+                .received_requests()
+                .await
+                .expect("requests are readable")
+                .is_empty(),
+            "malformed cookies must not reach Vault"
+        );
+    }
+
+    #[tokio::test]
+    async fn whoami_unknown_session_uuid_is_401() {
+        let response = send(
+            app(Arc::new(MemoryStore::new()), TEST_VAULT_URL),
+            Some(signed_value(&new_uuid())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response_body(response).await,
+            r#"{"error-message":"Not Authenticated"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn download_unknown_session_uuid_is_401_empty() {
+        let vault = MockServer::start().await;
+        let response = send_download(
+            app(Arc::new(MemoryStore::new()), &vault.uri()),
+            Some(&signed_value(&new_uuid())),
+            "myserver",
+            CSRF_TOKEN,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response_body(response).await.is_empty());
+        assert!(
+            vault
+                .received_requests()
+                .await
+                .expect("requests are readable")
+                .is_empty(),
+            "an unknown session UUID must not reach Vault"
+        );
     }
 }

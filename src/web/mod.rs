@@ -5,6 +5,7 @@ pub mod auth;
 pub mod portal;
 pub mod static_files;
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use axum::routing::{get, post};
@@ -29,12 +30,18 @@ pub(crate) mod templates {
         EmbeddedTemplates::get(name).map(|file| String::from_utf8_lossy(&file.data).into_owned())
     }
 
-    /// Returns a template's source, preferring a mounted directory file.
-    pub(crate) fn source(name: &str) -> Option<String> {
-        match std::fs::read(std::path::Path::new("templates").join(name)) {
+    /// Returns a template's source from `root`, preferring a mounted file over
+    /// the embedded default.
+    fn source_from(name: &str, root: &Path) -> Option<String> {
+        match std::fs::read(root.join(name)) {
             Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
             Err(_) => embedded_source(name),
         }
+    }
+
+    /// Returns a template's source, preferring the mounted `templates/` file.
+    pub(crate) fn source(name: &str) -> Option<String> {
+        source_from(name, Path::new("templates"))
     }
 
     pub(crate) fn environment() -> &'static Environment<'static> {
@@ -72,10 +79,49 @@ pub(crate) mod templates {
     mod tests {
         use super::*;
 
+        /// A uniquely named temp template root removed on drop, even on panic.
+        struct TempTemplateRoot(std::path::PathBuf);
+
+        impl TempTemplateRoot {
+            fn new(label: &str, name: &str, contents: &str) -> Self {
+                let unique = format!(
+                    "vsm-templates-{label}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock is after the unix epoch")
+                        .as_nanos()
+                );
+                let root = std::env::temp_dir().join(unique);
+                std::fs::create_dir_all(&root).expect("create template temp root");
+                std::fs::write(root.join(name), contents).expect("write template override");
+                Self(root)
+            }
+        }
+
+        impl Drop for TempTemplateRoot {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
         #[test]
         fn template_is_embedded_for_diskless_runtime() {
             let source = embedded_source("base.html").expect("base.html is embedded");
             assert!(source.contains("<!DOCTYPE html>"));
+        }
+
+        #[test]
+        fn mounted_template_overrides_embedded_source() {
+            let marker = "<!-- mounted base.html override -->";
+            let root = TempTemplateRoot::new("override", "base.html", marker);
+
+            let source = source_from("base.html", &root.0).expect("template source is available");
+            assert_eq!(source, marker);
+            assert_ne!(
+                source,
+                embedded_source("base.html").expect("base.html is embedded")
+            );
         }
     }
 }

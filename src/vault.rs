@@ -196,6 +196,9 @@ fn string_field<'a>(object: &'a Value, key: &str, operation: &str) -> Result<&'a
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use serde_json::json;
     use url::Url;
     use wiremock::matchers::{body_json, header, method, path};
@@ -324,5 +327,110 @@ mod tests {
 
         VaultClient::new(url.clone(), None, true).expect("verified client builds");
         VaultClient::new(url, None, false).expect("development client builds");
+    }
+
+    /// A small self-signed CA certificate (EC P-256, CA:TRUE), used to prove
+    /// that both the inline-PEM and file branches add a real trust anchor.
+    const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+        MIIBbDCCARKgAwIBAgIUO023fiG5B/sykfylcl6sqJaDTlQwCgYIKoZIzj0EAwIw\n\
+        HDEaMBgGA1UEAwwRVlNNIFRlc3QgVmF1bHQgQ0EwHhcNMjYxMTI2MTU0MzE4WhcN\n\
+        MzYxMTIzMTU0MzE4WjAcMRowGAYDVQQDDBFWU00gVGVzdCBWYXVsdCBDQTBZMBMG\n\
+        ByqGSM49AgEGCCqGSM49AwEHA0IABGjn4UydI9FBnMo2zivVY5603xAboskGzZ4Z\n\
+        sjpppDXQDOn8/gLxJYMvbjV/TZ5fF/+Po9yjHcjcimX3JIiLqeujMjAwMB0GA1Ud\n\
+        DgQWBBQpp0ak7u0xmCWSbuo7bCof1cKi2DAPBgNVHRMBAf8EBTADAQH/MAoGCCqG\n\
+        SM49BAMCA0gAMEUCIGM5RTycZnwu2q7Pnu6BKY1MZGTefoBjBqdkqT52ojotAiEA\n\
+        w/c6vpMjMgW1newC6V20GvazQXNZbrs0aEhWhyVElcM=\n\
+        -----END CERTIFICATE-----\n";
+
+    /// Well-formed PEM whose block is a public key, not a certificate.
+    const NO_CERTIFICATE_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaOfhTJ0j0UGcyjbOK9VjnrTfEBui\n\
+        yQbNnhmyOmmkNdAM6fz+AvElgy9uNX9Nnl8X/4+j3KMdyNyKZfckiIup6w==\n\
+        -----END PUBLIC KEY-----\n";
+
+    fn test_url() -> Url {
+        Url::parse("https://vault.example.com").expect("valid url")
+    }
+
+    fn temp_ca_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "vsm-vault-ca-{label}-{}-{nanos}.pem",
+            std::process::id()
+        ))
+    }
+
+    /// A uniquely named temp PEM file removed on drop, even on panic.
+    struct TempCaFile(PathBuf);
+
+    impl TempCaFile {
+        fn new(label: &str, contents: &str) -> Self {
+            let path = temp_ca_path(label);
+            std::fs::write(&path, contents).expect("test CA file written");
+            Self(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().expect("UTF-8 temp path")
+        }
+    }
+
+    impl Drop for TempCaFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn inline_pem_custom_ca_builds_verified_client() {
+        VaultClient::new(test_url(), Some(TEST_CA_PEM), true)
+            .expect("an inline PEM containing BEGIN is treated as PEM, not a path");
+    }
+
+    #[test]
+    fn custom_ca_file_with_valid_pem_builds_verified_client() {
+        let file = TempCaFile::new("valid", TEST_CA_PEM);
+        VaultClient::new(test_url(), Some(file.path()), true)
+            .expect("a mounted PEM file is added to the root store");
+    }
+
+    #[test]
+    fn missing_custom_ca_file_is_rejected() {
+        let path = temp_ca_path("missing");
+        let path = path.to_str().expect("UTF-8 temp path");
+        let error = VaultClient::new(test_url(), Some(path), true)
+            .err()
+            .expect("a nonexistent CA path is rejected");
+        assert!(
+            format!("{error:#}").contains("failed to read the custom Vault CA file"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn invalid_custom_ca_pem_is_rejected() {
+        let file = TempCaFile::new("invalid", "this is not a PEM certificate\n");
+        let error = VaultClient::new(test_url(), Some(file.path()), true)
+            .err()
+            .expect("an invalid PEM file is rejected");
+        assert!(
+            format!("{error:#}").contains("custom Vault CA"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn custom_ca_pem_without_certificates_is_rejected() {
+        let file = TempCaFile::new("no-certs", NO_CERTIFICATE_PEM);
+        let error = VaultClient::new(test_url(), Some(file.path()), true)
+            .err()
+            .expect("a PEM file with no certificates is rejected");
+        assert!(
+            format!("{error:#}").contains("contains no PEM certificates"),
+            "unexpected error: {error:#}"
+        );
     }
 }

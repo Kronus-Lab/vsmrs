@@ -380,7 +380,7 @@ fn now_secs() -> f64 {
 /// Test-only provider fixtures shared by the OIDC and callback tests.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use openidconnect::core::{
         CoreHmacKey, CoreIdToken, CoreIdTokenClaims, CoreJwsSigningAlgorithm,
     };
@@ -416,18 +416,38 @@ pub(crate) mod test_support {
 
     /// Signs a minimal ID token with the configured client secret (HS256).
     pub(crate) fn signed_id_token(issuer: &str, nonce: &str) -> String {
-        let issuer = Url::parse(issuer).expect("valid issuer").to_string();
         let now = Utc::now();
+        signed_id_token_with(
+            issuer,
+            nonce,
+            CLIENT_ID,
+            CLIENT_SECRET.as_bytes(),
+            now,
+            now + Duration::hours(1),
+        )
+    }
+
+    /// Signs an ID token with explicitly chosen claims and key so negative
+    /// tests can vary one validation input at a time.
+    pub(crate) fn signed_id_token_with(
+        issuer: &str,
+        nonce: &str,
+        audience: &str,
+        signing_key: &[u8],
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> String {
+        let issuer = Url::parse(issuer).expect("valid issuer").to_string();
         let claims = CoreIdTokenClaims::new(
             IssuerUrl::new(issuer).expect("valid issuer"),
-            vec![Audience::new(CLIENT_ID.to_owned())],
-            now + Duration::hours(1),
-            now,
+            vec![Audience::new(audience.to_owned())],
+            expires_at,
+            issued_at,
             StandardClaims::new(SubjectIdentifier::new("test-subject".to_owned())),
             EmptyAdditionalClaims {},
         );
         let claims = claims.set_nonce(Some(Nonce::new(nonce.to_owned())));
-        let key = CoreHmacKey::new(CLIENT_SECRET.as_bytes().to_vec());
+        let key = CoreHmacKey::new(signing_key.to_vec());
         CoreIdToken::new(
             claims,
             &key,
@@ -684,6 +704,149 @@ mod tests {
             error.to_string().contains("ID token"),
             "unexpected error: {error:#}"
         );
+        server.verify().await;
+    }
+
+    /// Runs a full exchange against a healthy provider stub whose ID token is
+    /// signed by `id_token` and asserts it is rejected before userinfo.
+    async fn assert_id_token_rejected<F>(id_token: F)
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        test_support::mount_provider(
+            &server,
+            json!({
+                "access_token": "access-token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": id_token(&base),
+            }),
+            0,
+        )
+        .await;
+
+        let config = test_support::config(&base);
+        let client = OidcClient::new(&config).await.expect("discovery succeeds");
+        let error = client
+            .complete("some-code", "some-nonce", "some-verifier")
+            .await
+            .err()
+            .expect("the ID token is rejected before userinfo");
+        assert!(
+            error.to_string().contains("ID token verification failed"),
+            "unexpected error: {error:#}"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_id_token_with_mismatched_nonce() {
+        // The fixture always signs "some-nonce"; the pending login expects it.
+        assert_id_token_rejected(|base| test_support::signed_id_token(base, "other-nonce")).await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_id_token_with_bad_signature() {
+        let now = chrono::Utc::now();
+        assert_id_token_rejected(|base| {
+            test_support::signed_id_token_with(
+                base,
+                "some-nonce",
+                test_support::CLIENT_ID,
+                b"wrong-signing-secret",
+                now,
+                now + chrono::Duration::hours(1),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_id_token_with_wrong_issuer() {
+        let now = chrono::Utc::now();
+        assert_id_token_rejected(|_| {
+            test_support::signed_id_token_with(
+                "https://evil.example.com",
+                "some-nonce",
+                test_support::CLIENT_ID,
+                test_support::CLIENT_SECRET.as_bytes(),
+                now,
+                now + chrono::Duration::hours(1),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_id_token_with_wrong_audience() {
+        let now = chrono::Utc::now();
+        assert_id_token_rejected(|base| {
+            test_support::signed_id_token_with(
+                base,
+                "some-nonce",
+                "other-client",
+                test_support::CLIENT_SECRET.as_bytes(),
+                now,
+                now + chrono::Duration::hours(1),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_expired_id_token() {
+        let now = chrono::Utc::now();
+        assert_id_token_rejected(|base| {
+            test_support::signed_id_token_with(
+                base,
+                "some-nonce",
+                test_support::CLIENT_ID,
+                test_support::CLIENT_SECRET.as_bytes(),
+                now - chrono::Duration::hours(2),
+                now - chrono::Duration::hours(1),
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_follow_redirects() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("Location", format!("{base}/redirected")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // A provider reachable only after the redirect must never be used.
+        let issuer = Url::parse(&base).expect("valid issuer").to_string();
+        Mock::given(method("GET"))
+            .and(path("/redirected"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{base}/auth"),
+                "token_endpoint": format!("{base}/token"),
+                "userinfo_endpoint": format!("{base}/userinfo"),
+                "jwks_uri": format!("{base}/jwks"),
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["HS256"],
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let config = test_support::config(&base);
+        let client = OidcClient::new(&config)
+            .await
+            .expect("discovery failure must not abort startup");
+        assert!(client.authorization_request().await.is_err());
         server.verify().await;
     }
 
