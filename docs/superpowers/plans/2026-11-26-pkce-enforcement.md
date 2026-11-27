@@ -117,6 +117,7 @@ In `test/presetup/main.tf`, inside `resource "keycloak_openid_client" "vsm"` (li
 ```
 
 Then run `tofu fmt` in `test/presetup/` to fix `=` alignment. No other Terraform changes.
+Note (accepted deviation): canonical `tofu fmt` realignment was deliberately not applied because it rewrites the seven neighbouring attribute lines; the one-line diff was kept (controller ruling, final review accepted).
 
 - [ ] **Step 5: Apply to the running stack**
 

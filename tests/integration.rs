@@ -203,11 +203,14 @@ async fn keycloak_enforces_pkce() {
         let location = resp.headers()["location"].to_str().unwrap();
         assert!(location.starts_with("http://vsm.local.kronus.network/auth/callback"));
         assert!(
-            location.contains("error="),
+            location.contains("error=invalid_request"),
             "expected OAuth error redirect, got {location}"
         );
         assert!(
-            !location.contains("code="),
+            reqwest::Url::parse(location)
+                .unwrap()
+                .query_pairs()
+                .all(|(k, _)| k != "code"),
             "no authorization code may be issued"
         );
     }
@@ -224,6 +227,12 @@ async fn keycloak_enforces_pkce() {
     ));
     plain.push(("code_challenge_method", "plain"));
     let url = reqwest::Url::parse_with_params(auth_url, plain).unwrap();
+    assert_rejected(&client, url).await;
+
+    // Probe 3: method present without a challenge — isolates the missing-challenge case with the method present.
+    let mut missing_challenge = base_params.to_vec();
+    missing_challenge.push(("code_challenge_method", "S256"));
+    let url = reqwest::Url::parse_with_params(auth_url, missing_challenge).unwrap();
     assert_rejected(&client, url).await;
 
     // Positive control: valid S256 challenge reaches the login form.

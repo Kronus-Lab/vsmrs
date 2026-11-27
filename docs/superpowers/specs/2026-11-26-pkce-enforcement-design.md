@@ -34,7 +34,7 @@ nothing in the stack tests enforcement.
   pattern and lives in `tests/integration.rs` with helpers in
   `tests/support/mod.rs`.
 - Verification needs the integration stack: compose up, `wait.sh`,
-  `terraform init --upgrade && terraform apply --auto-approve`, release binary,
+  `terraform init --upgrade && terraform apply --auto-approve` (CI; `tofu` locally), release binary,
   `VSM_BASE_URL=http://localhost:3000 npm test`.
 
 ## Approaches
