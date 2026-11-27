@@ -25,3 +25,10 @@
 - Integration: bring up `docker-compose-common.yml` + `docker-compose-integration.yml`, run `./test/presetup/wait.sh`, then `tofu init --upgrade && tofu apply --auto-approve` in `test/presetup`, start the release binary, and run `VSM_BASE_URL=http://localhost:3000 npm test` (`cargo test --test integration -- --ignored`). The 13 black-box HTTP tests are marked `#[ignore = "requires the integration stack"]`.
 - E2E: `docker-compose-common.yml` + `docker-compose-e2e.yml`, image `kr0nus/vsm:devel`, Cypress `cypress/e2e/vsm.cy.js` in Chrome and Firefox; delete `cypress/screenshots` and `cypress/downloads` between runs.
 - Image build: `npm run build` (`scripts/build-image.sh`) compiles the static musl binary in a pinned `rust:1-alpine` builder container into `dist/vsm`; the `FROM scratch` image only packages that file and the context contains only `dist/vsm`. No host musl toolchain is needed. The toolchain, crate registry and target dir are cached in `vsm-rustup`/`vsm-cargo`/`vsm-build-cache` (or under `VSM_CACHE_DIR`); Cargo and rustup invalidate per dependency/toolchain change, and `--locked` makes a stale lockfile fail instead of silently re-resolving.
+
+## Agent commit signing
+
+- Agent commits must use author and committer `OpenCode Agent (Big Pickle) <noreply@kronus.network>`.
+- The agent signing key is `029561648B9558A2F4457E890A8C95D41BC5B11D`.
+- The global config's `user.signingkey` points at a human hardware key, so every agent commit must override it per command, e.g. `git -c user.name="OpenCode Agent (Big Pickle)" -c user.email="noreply@kronus.network" -c user.signingkey=029561648B9558A2F4457E890A8C95D41BC5B11D commit -S029561648B9558A2F4457E890A8C95D41BC5B11D ... --trailer "Co-Authored-By: Mathieu Dugas <mathieu.dugas@gmail.com>"`.
+- Never run `git config` to set agent identity or signing key.
